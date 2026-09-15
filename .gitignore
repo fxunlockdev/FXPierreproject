@@ -1,0 +1,35 @@
+# dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# builds
+.next/
+out/
+dist/
+build/
+.turbo/
+
+# env — never commit secrets
+.env
+.env.*
+!.env.example
+
+# testing
+coverage/
+playwright-report/
+test-results/
+blob-report/
+
+# misc
+.DS_Store
+*.pem
+*.log
+npm-debug.log*
+.vercel
+*.tsbuildinfo
+next-env.d.ts
+
+# telegram sessions must never land in git
+*.session
+*.session-journal
