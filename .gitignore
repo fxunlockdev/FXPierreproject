@@ -33,3 +33,6 @@ next-env.d.ts
 # telegram sessions must never land in git
 *.session
 *.session-journal
+
+# e2e local credentials
+.e2e-env.json
