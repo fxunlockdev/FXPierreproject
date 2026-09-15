@@ -15,7 +15,7 @@ const ALLOWED = [
   /^channels\/(resolve|join)$/,
   /^forwards\/retry$/,
   /^alerts\/test$/,
-  /^sim\/(post|edit|delete)$/,
+  /^sim\/(post|edit|delete|fail)$/,
 ];
 
 async function proxy(req: NextRequest, path: string[]): Promise<NextResponse> {

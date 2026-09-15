@@ -346,6 +346,28 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       await sim.injectDelete(body.chatTgId, body.messageIds);
       return { ok: true };
     });
+
+    // Configure a delivery failure for a target chat (e2e error-path testing).
+    app.post('/sim/fail', async (req) => {
+      const body = z
+        .object({
+          chatTgId: z.string(),
+          code: z.enum(['flood_wait', 'forbidden', 'protected', 'not_found', 'network', 'off']),
+          retryAfterSeconds: z.number().int().min(0).max(3600).optional(),
+          times: z.number().int().min(1).max(100).optional(),
+        })
+        .parse(req.body);
+      if (body.code === 'off') {
+        sim.failures.delete(body.chatTgId);
+      } else {
+        sim.failures.set(body.chatTgId, {
+          code: body.code,
+          retryAfterSeconds: body.retryAfterSeconds,
+          times: body.times,
+        });
+      }
+      return { ok: true };
+    });
   }
 
   return app;
