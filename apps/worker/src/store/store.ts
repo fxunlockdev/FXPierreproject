@@ -31,8 +31,26 @@ export interface Store {
   updateForward(id: string, patch: Partial<ForwardRecord>): Promise<void>;
   /** Atomically claim due queued/scheduled/held rows (sets them to sending). */
   claimDue(now: Date, limit: number): Promise<ForwardRecord[]>;
-  /** Latest completed 'post' forward for edit/delete sync. */
-  findDone(routeId: string, srcMessageId: number): Promise<ForwardRecord | null>;
+  /**
+   * Park rows stuck in `sending` since before `before` as failed with `note`.
+   * They are never requeued — the send may already have reached Telegram.
+   * Returns how many rows were parked.
+   */
+  parkStaleSending(before: Date, note: string): Promise<number>;
+  /**
+   * Latest 'post' forward in ANY state for edit/delete sync — an edit that
+   * arrives while the post is still queued must update it in place, and a
+   * delete must cancel it, so neither event is ever lost.
+   */
+  findPost(
+    routeId: string,
+    srcMessageId: number,
+  ): Promise<{
+    id: string;
+    state: ForwardRecord['state'];
+    receiverChannelId: string;
+    destMessageIds?: number[];
+  } | null>;
   countPending(): Promise<number>;
 
   heartbeat(hb: Heartbeat): Promise<void>;

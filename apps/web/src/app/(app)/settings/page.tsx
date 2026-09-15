@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 import { toast } from "sonner";
 import { Moon, Sun, UserPlus } from "@phosphor-icons/react";
 import { SectionHeader, Skeleton } from "@/components/ui/bits";
@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Field, Input } from "@/components/ui/field";
 import { Select } from "@/components/ui/select";
 import { timeAgo } from "@/lib/format";
+import { isLightTheme, serverIsLightTheme, subscribeTheme, toggleTheme } from "@/lib/theme";
 import {
   useAddMember,
   useAppSettings,
@@ -17,25 +18,10 @@ import {
 } from "@/lib/queries";
 
 function ThemeToggle() {
-  const [light, setLight] = useState(false);
-
-  useEffect(() => {
-    setLight(document.documentElement.classList.contains("light"));
-  }, []);
-
-  const toggle = () => {
-    const next = !light;
-    setLight(next);
-    document.documentElement.classList.toggle("light", next);
-    try {
-      localStorage.setItem("sy-theme", next ? "light" : "dark");
-    } catch {
-      // storage may be unavailable; the toggle still works for this session
-    }
-  };
+  const light = useSyncExternalStore(subscribeTheme, isLightTheme, serverIsLightTheme);
 
   return (
-    <Button size="sm" onClick={toggle}>
+    <Button size="sm" onClick={toggleTheme}>
       {light ? <Moon size={14} /> : <Sun size={14} />}
       {light ? "Switch to dark" : "Switch to light"}
     </Button>
@@ -44,18 +30,17 @@ function ThemeToggle() {
 
 function RelaySettings() {
   const { data: settings, isLoading } = useAppSettings();
+  if (isLoading || !settings) return <Skeleton className="h-32" />;
+  return <RelayForm settings={settings} />;
+}
+
+type AppSettingsRow = NonNullable<ReturnType<typeof useAppSettings>["data"]>;
+
+function RelayForm({ settings }: { settings: AppSettingsRow }) {
   const update = useUpdateAppSettings();
-  const [retention, setRetention] = useState(30);
-  const [catchup, setCatchup] = useState(15);
-
-  useEffect(() => {
-    if (settings) {
-      setRetention(settings.retention_days);
-      setCatchup(settings.catchup_window_minutes);
-    }
-  }, [settings]);
-
-  if (isLoading) return <Skeleton className="h-32" />;
+  // Seeded from the server row once — refetches must not stomp in-progress edits.
+  const [retention, setRetention] = useState(settings.retention_days);
+  const [catchup, setCatchup] = useState(settings.catchup_window_minutes);
 
   return (
     <form
@@ -147,6 +132,7 @@ function Team() {
           />
         </Field>
         <Select
+          aria-label="New member role"
           value={role}
           onValueChange={setRole}
           options={[

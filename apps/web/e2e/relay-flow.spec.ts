@@ -103,9 +103,11 @@ test.describe.serial("relay flow", () => {
     const posted = await workerSim(request, "sim/post", { text: "buy entry 1.0850" });
 
     await page.goto("/activity");
-    await expect(page.locator("tr", { hasText: "LONG entry 1.0850" }).first()).toBeVisible({
-      timeout: 20_000,
-    });
+    const postRow = page.locator("tr", { hasText: "LONG entry 1.0850" }).first();
+    await expect(postRow).toBeVisible({ timeout: 20_000 });
+    // wait until delivered — an edit against a still-queued post is applied
+    // in place instead of creating an edit forward
+    await expect(postRow.getByText("done")).toBeVisible({ timeout: 20_000 });
 
     await workerSim(request, "sim/edit", {
       chatTgId: posted.chatTgId,
@@ -125,7 +127,7 @@ test.describe.serial("relay flow", () => {
     await signIn(page);
     await page.goto("/routes");
 
-    const toggle = page.getByLabel(`Route to ${RECEIVER_NAME}`);
+    const toggle = page.getByRole("switch", { name: `Route to ${RECEIVER_NAME}` });
     await toggle.click();
     await expect(toggle).toHaveAttribute("data-state", "unchecked");
     await page.waitForTimeout(1500); // let the worker pick up the config change
@@ -169,13 +171,16 @@ test.describe.serial("relay flow", () => {
     await workerSim(request, "sim/post", { text: "fail three" });
 
     await page.goto("/alerts");
-    await expect(page.getByText("Receiver unreachable").first()).toBeVisible({ timeout: 25_000 });
-    await expect(page.getByText("Route auto-paused").first()).toBeVisible({ timeout: 25_000 });
+    // scope to the incidents section — the Delivery settings below list the
+    // same labels as trigger names, which must never satisfy this assertion
+    const incidents = page.locator("section").filter({ hasText: "Open incidents" });
+    await expect(incidents.getByText("Receiver unreachable").first()).toBeVisible({ timeout: 25_000 });
+    await expect(incidents.getByText("Route auto-paused").first()).toBeVisible({ timeout: 25_000 });
 
     // stop failing, re-enable the route, retry the failed forward from the UI
     await workerSim(request, "sim/fail", { chatTgId: receiverTg, code: "off" });
     await page.goto("/routes");
-    const toggle = page.getByLabel(`Route to ${RECEIVER_NAME}`);
+    const toggle = page.getByRole("switch", { name: `Route to ${RECEIVER_NAME}` });
     await expect(toggle).toHaveAttribute("data-state", "unchecked", { timeout: 15_000 });
     await toggle.click();
     await page.waitForTimeout(1500);

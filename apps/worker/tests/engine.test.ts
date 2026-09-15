@@ -3,6 +3,7 @@ import { parseRouteRules, parseRouteSchedule } from '@pierre/core';
 import { RelayEngine } from '../src/engine';
 import { MemoryStore } from '../src/store/memory-store';
 import { SimTransport } from '../src/transport/sim';
+import { TransportError, type SendOptions } from '../src/transport/transport';
 import type { RelayConfig, Route } from '../src/model';
 
 const MASTER_TG = '-100111';
@@ -359,5 +360,153 @@ describe('RelayEngine — catch-up', () => {
 
     expect(sim.sent).toHaveLength(1);
     expect(sim.sent[0]!.text.text).toBe('missed while offline');
+  });
+});
+
+describe('RelayEngine — delivery is never duplicated by storage failures', () => {
+  it('retries the completion write instead of re-sending the post', async () => {
+    const original = store.updateForward.bind(store);
+    let failedOnce = false;
+    store.updateForward = async (id, patch) => {
+      if (patch.state === 'done' && !failedOnce) {
+        failedOnce = true;
+        throw new Error('sim: transient storage outage');
+      }
+      return original(id, patch);
+    };
+
+    await sim.injectPost(MASTER_TG, 'exactly once');
+    await drain();
+
+    expect(failedOnce).toBe(true);
+    expect(sim.sent).toHaveLength(1); // the send never repeated
+    const row = [...store.forwards.values()][0]!;
+    expect(row.state).toBe('done');
+  });
+
+  it('parks an unconfirmed forward as failed instead of requeueing it', async () => {
+    await setup(); // fresh engine with default options
+    engine = new RelayEngine(store, { albumWaitMs: 15, clock, staleSendingSeconds: 5 });
+    engine.registerTransport(sim);
+    await engine.init();
+    await sim.start(engine.handlers);
+
+    const original = store.updateForward.bind(store);
+    store.updateForward = async (id, patch) => {
+      if (patch.state === 'done') throw new Error('sim: storage down for good');
+      return original(id, patch);
+    };
+
+    await sim.injectPost(MASTER_TG, 'sent but unconfirmed');
+    await engine.tick(); // send succeeds, completion write keeps failing
+
+    expect(sim.sent).toHaveLength(1);
+    let row = [...store.forwards.values()][0]!;
+    expect(row.state).toBe('sending');
+
+    store.updateForward = original; // storage recovers
+    nowMs += 120_000; // past staleSendingSeconds AND the reaper's 60s interval
+    await engine.tick();
+
+    row = [...store.forwards.values()][0]!;
+    expect(row.state).toBe('failed'); // parked — NOT requeued, NOT re-sent
+    expect(row.lastError).toContain('unconfirmed');
+    expect(sim.sent).toHaveLength(1);
+  });
+});
+
+/** Sends album items one by one (Bot API style) and can fail mid-loop. */
+class ItemwiseSim extends SimTransport {
+  failAfterItems = Infinity;
+  private destSeq = 5000;
+
+  override async copy(opts: SendOptions): Promise<number[]> {
+    const ids: number[] = [];
+    for (let i = 0; i < opts.srcMessageIds.length; i += 1) {
+      if (i >= this.failAfterItems) {
+        throw new TransportError('network', 'sim: album interrupted mid-loop');
+      }
+      ids.push(this.destSeq++);
+      await opts.onSent?.(ids.slice());
+    }
+    this.sent.push({ ...opts, destMessageIds: ids.slice(), native: false });
+    return ids;
+  }
+}
+
+describe('RelayEngine — album resume', () => {
+  it('a retried album skips items that already went out', async () => {
+    const itemwise = new ItemwiseSim('acc-sim');
+    engine = new RelayEngine(store, { albumWaitMs: 15, clock, backoffSeconds: [1] });
+    engine.registerTransport(itemwise);
+    await engine.init();
+    await itemwise.start(engine.handlers);
+
+    itemwise.failAfterItems = 2;
+    for (const id of [21, 22, 23, 24]) {
+      await itemwise.injectPost(MASTER_TG, id === 21 ? 'album caption' : '', {
+        media: 'photo',
+        albumKey: 'albX',
+        messageId: id,
+      });
+    }
+    await sleep(40); // let the album window close
+    await engine.tick(); // first attempt: 2 items land, then the loop dies
+
+    let row = [...store.forwards.values()][0]!;
+    expect(row.state).toBe('queued'); // requeued with backoff
+    expect(row.destMessageIds).toHaveLength(2); // checkpointed progress
+
+    itemwise.failAfterItems = Infinity;
+    await drain();
+
+    row = [...store.forwards.values()][0]!;
+    expect(row.state).toBe('done');
+    expect(row.destMessageIds).toHaveLength(4);
+    expect(new Set(row.destMessageIds).size).toBe(4); // no item delivered twice
+
+    // the resumed batch carried only the remaining 2 items, without a caption
+    const resumed = itemwise.sent.at(-1)!;
+    expect(resumed.srcMessageIds).toEqual([23, 24]);
+    expect(resumed.applyCaption).toBe(false);
+  });
+});
+
+describe('RelayEngine — edits and deletes against a not-yet-sent post', () => {
+  it('an edit while the post is still queued rewrites it in place — one send, edited text', async () => {
+    store.config.routes = [baseRoute({ delaySeconds: 60 })];
+    await engine.reload();
+
+    await sim.injectPost(MASTER_TG, 'buy gold at 2650', { messageId: 70 });
+    await sleep(30); // past album window; post is now scheduled 60s out
+    await engine.tick();
+    expect(sim.sent).toHaveLength(0);
+
+    await sim.injectEdit(MASTER_TG, 70, 'buy gold at 2700 CORRECTED');
+    nowMs += 61_000;
+    await drain();
+
+    expect(sim.sent).toHaveLength(1); // never a second message
+    expect(sim.sent[0]!.text.text).toBe('buy gold at 2700 CORRECTED');
+    expect(sim.edits).toHaveLength(0); // no edit call — nothing was out yet
+  });
+
+  it('a delete while the post is still queued cancels it — nothing is ever sent', async () => {
+    store.config.routes = [baseRoute({ delaySeconds: 60 })];
+    await engine.reload();
+
+    await sim.injectPost(MASTER_TG, 'deleted before send', { messageId: 71 });
+    await sleep(30);
+    await engine.tick();
+
+    await sim.injectDelete(MASTER_TG, [71]);
+    nowMs += 61_000;
+    await drain();
+
+    expect(sim.sent).toHaveLength(0);
+    expect(sim.deletions).toHaveLength(0);
+    const row = [...store.forwards.values()].find((f) => f.srcMessageId === 71)!;
+    expect(row.state).toBe('dropped');
+    expect(row.dropReason).toContain('deleted at the source');
   });
 });

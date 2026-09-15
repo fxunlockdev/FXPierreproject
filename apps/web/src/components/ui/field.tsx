@@ -1,6 +1,13 @@
 "use client";
 
-import { forwardRef, type InputHTMLAttributes, type TextareaHTMLAttributes } from "react";
+import {
+  cloneElement,
+  forwardRef,
+  isValidElement,
+  useId,
+  type InputHTMLAttributes,
+  type TextareaHTMLAttributes,
+} from "react";
 
 const inputStyles =
   "w-full rounded-lg border border-edge bg-surface px-3 text-sm text-ink placeholder:text-faint " +
@@ -38,12 +45,37 @@ export function Field({
   children: React.ReactNode;
   className?: string;
 }) {
+  // Explicit htmlFor + aria-describedby, NOT a wrapping <label>: wrapping
+  // would fold the hint text into the control's accessible name.
+  const autoId = useId();
+  const describedBy = hint || error ? `${autoId}-desc` : undefined;
+  const child = isValidElement(children)
+    ? cloneElement(children as React.ReactElement<Record<string, unknown>>, {
+        id: (children.props as { id?: string }).id ?? autoId,
+        "aria-describedby": describedBy,
+        "aria-invalid": error ? true : undefined,
+      })
+    : children;
+  const childId = isValidElement(children)
+    ? ((children.props as { id?: string }).id ?? autoId)
+    : autoId;
+
   return (
-    <label className={`flex flex-col gap-2 ${className}`}>
-      <span className="text-[13px] font-medium text-mute">{label}</span>
-      {children}
-      {hint && !error && <span className="text-xs text-faint">{hint}</span>}
-      {error && <span className="text-xs text-danger">{error}</span>}
-    </label>
+    <div className={`flex flex-col gap-2 ${className}`}>
+      <label htmlFor={childId} className="text-[13px] font-medium text-mute">
+        {label}
+      </label>
+      {child}
+      {hint && !error && (
+        <span id={describedBy} className="text-xs text-faint">
+          {hint}
+        </span>
+      )}
+      {error && (
+        <span id={describedBy} className="text-xs text-danger">
+          {error}
+        </span>
+      )}
+    </div>
   );
 }

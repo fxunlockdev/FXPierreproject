@@ -67,9 +67,13 @@ export class MemoryStore implements Store {
     return { id, deduped: false };
   }
 
+  private sendingSince = new Map<string, number>();
+
   async updateForward(id: string, patch: Partial<ForwardRecord>): Promise<void> {
     const row = this.forwards.get(id);
-    if (row) Object.assign(row, patch);
+    if (!row) return;
+    Object.assign(row, patch);
+    if (patch.state && patch.state !== 'sending') this.sendingSince.delete(id);
   }
 
   async claimDue(now: Date, limit: number): Promise<ForwardRecord[]> {
@@ -81,17 +85,33 @@ export class MemoryStore implements Store {
       )
       .sort((a, b) => a.deliverAt.getTime() - b.deliverAt.getTime())
       .slice(0, limit);
-    for (const f of due) f.state = 'sending';
+    for (const f of due) {
+      f.state = 'sending';
+      this.sendingSince.set(f.id, now.getTime());
+    }
     return structuredClone(due);
   }
 
-  async findDone(routeId: string, srcMessageId: number): Promise<ForwardRecord | null> {
+  async parkStaleSending(before: Date, note: string): Promise<number> {
+    let parked = 0;
+    for (const [id, since] of this.sendingSince) {
+      const row = this.forwards.get(id);
+      if (row?.state === 'sending' && since < before.getTime()) {
+        row.state = 'failed';
+        row.lastError = note;
+        this.sendingSince.delete(id);
+        parked += 1;
+      }
+    }
+    return parked;
+  }
+
+  async findPost(routeId: string, srcMessageId: number): Promise<ForwardRecord | null> {
     return (
       [...this.forwards.values()].find(
         (f) =>
           f.routeId === routeId &&
           f.kind === 'post' &&
-          f.state === 'done' &&
           (f.srcMessageId === srcMessageId || (f.srcMessageIds ?? []).includes(srcMessageId)),
       ) ?? null
     );

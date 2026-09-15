@@ -125,7 +125,10 @@ async function main(): Promise<void> {
       });
   }, 800);
 
-  const pollTimer = setInterval(() => void engine.reload().catch(() => {}), 30_000);
+  const pollTimer = setInterval(
+    () => void engine.reload().catch(() => {}),
+    env.CONFIG_POLL_SECONDS * 1000,
+  );
 
   const app = buildServer({
     env,

@@ -1,3 +1,7 @@
+export function nowMs(): number {
+  return Date.now();
+}
+
 export function timeAgo(iso: string | null | undefined): string {
   if (!iso) return "never";
   const seconds = Math.round((Date.now() - new Date(iso).getTime()) / 1000);

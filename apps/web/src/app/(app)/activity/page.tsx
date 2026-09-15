@@ -189,9 +189,9 @@ export default function ActivityPage() {
       </header>
 
       <div className="flex flex-wrap gap-2">
-        <Select value={state} onValueChange={setState} options={STATE_OPTIONS} className="w-36" />
-        <Select value={kind} onValueChange={setKind} options={KIND_OPTIONS} className="w-32" />
-        <Select value={routeId} onValueChange={setRouteId} options={routeOptions} className="min-w-52" />
+        <Select aria-label="Filter by state" value={state} onValueChange={setState} options={STATE_OPTIONS} className="w-36" />
+        <Select aria-label="Filter by kind" value={kind} onValueChange={setKind} options={KIND_OPTIONS} className="w-32" />
+        <Select aria-label="Filter by route" value={routeId} onValueChange={setRouteId} options={routeOptions} className="min-w-52" />
       </div>
 
       {isLoading ? (
@@ -242,10 +242,18 @@ export default function ActivityPage() {
                     {formatLatency(f.latency_ms)}
                   </td>
                   <td className="max-w-72 truncate py-2.5 text-[12.5px] text-mute">
+                    {/* an operator needs to see WHICH message had the problem,
+                        not only the reason — show content and cause together */}
                     {f.last_error ? (
-                      <span className="text-danger">{f.last_error}</span>
+                      <>
+                        {f.preview && <span className="mr-1.5">{f.preview}</span>}
+                        <span className="text-danger">— {f.last_error}</span>
+                      </>
                     ) : f.drop_reason ? (
-                      <span className="text-warn">{f.drop_reason}</span>
+                      <>
+                        {f.preview && <span className="mr-1.5">{f.preview}</span>}
+                        <span className="text-warn">— {f.drop_reason}</span>
+                      </>
                     ) : (
                       (f.preview ?? "—")
                     )}

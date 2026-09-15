@@ -18,6 +18,7 @@ export interface SentRecord {
   silent: boolean;
   removeButtons: boolean;
   native: boolean; // true = forward(), false = copy()
+  applyCaption?: boolean;
 }
 
 /**

@@ -239,6 +239,7 @@ export default function RoutesPage() {
 
                 <div className="mt-5 flex flex-wrap items-center gap-2">
                   <Select
+                    aria-label="Receiver to link"
                     value={linking || undefined}
                     onValueChange={setLinking}
                     placeholder={unlinked.length === 0 ? "All receivers are linked" : "Choose a receiver…"}

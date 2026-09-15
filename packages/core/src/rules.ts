@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { DateTime } from 'luxon';
 import { MEDIA_KINDS, type PipelineContext, type RelayMessage, type RichText } from './types';
-import { checkFilters } from './filters';
+import { checkFilters, regexRiskReason } from './filters';
 import { applyLinkRemoval, applyReplacements, stripSignature } from './transforms';
 import { appendRichText, prependRichText, tidyWhitespace, truncateRichText } from './richtext';
 import { expandVariables, parseMiniMarkdown } from './mini-markdown';
@@ -77,16 +77,63 @@ export type LinkRemoval = z.infer<typeof LinkRemovalSchema>;
 export type RouteRules = z.infer<typeof RouteRulesSchema>;
 export type RouteSchedule = z.infer<typeof RouteScheduleSchema>;
 
-/** Parse rules coming from the database; malformed JSON degrades to defaults. */
-export function parseRouteRules(json: unknown): RouteRules {
+/**
+ * Parse rules coming from the database; malformed JSON degrades to defaults,
+ * but never silently: pass `onInvalid` to surface what was ignored.
+ */
+export function parseRouteRules(json: unknown, onInvalid?: (detail: string) => void): RouteRules {
   const parsed = RouteRulesSchema.safeParse(json ?? {});
-  return parsed.success ? parsed.data : RouteRulesSchema.parse({});
+  if (parsed.success) return parsed.data;
+  onInvalid?.(parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '));
+  return RouteRulesSchema.parse({});
 }
 
-export function parseRouteSchedule(json: unknown): RouteSchedule | null {
+export function parseRouteSchedule(
+  json: unknown,
+  onInvalid?: (detail: string) => void,
+): RouteSchedule | null {
   if (json === null || json === undefined) return null;
   const parsed = RouteScheduleSchema.safeParse(json);
-  return parsed.success ? parsed.data : null;
+  if (parsed.success) return parsed.data;
+  onInvalid?.(parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '));
+  return null;
+}
+
+/**
+ * Save-time validation for the dashboard: schema plus regex-safety checks.
+ * Returns a human-readable problem, or null when the rules are safe to save.
+ * (The relay itself stays permissive — a bad pattern there is skipped with a
+ * warning, never fatal.)
+ */
+export function findRouteRulesProblem(json: unknown): string | null {
+  const parsed = RouteRulesSchema.safeParse(json ?? {});
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    return issue ? `${issue.path.join('.') || 'rules'}: ${issue.message}` : 'invalid rules';
+  }
+  const r = parsed.data;
+  const patterns: [label: string, pattern: string | undefined][] = [
+    ['include regex', r.filters.includeRegex],
+    ['exclude regex', r.filters.excludeRegex],
+    ['signature pattern', r.signatureStrip || undefined],
+    ...r.replacements.map(
+      (rep, idx): [string, string | undefined] => [
+        `replacement #${idx + 1}`,
+        rep.regex ? rep.find : undefined,
+      ],
+    ),
+  ];
+  for (const [label, pattern] of patterns) {
+    if (!pattern) continue;
+    const risk = regexRiskReason(pattern);
+    if (risk) return `${label}: ${risk}`;
+    try {
+      new RegExp(pattern, 'u');
+    } catch {
+      return `${label}: not a valid regular expression`;
+    }
+  }
+  return null;
 }
 
 // ── pipeline ───────────────────────────────────────────────────────────────

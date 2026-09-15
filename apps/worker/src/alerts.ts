@@ -1,4 +1,57 @@
+import { lookup } from 'node:dns/promises';
+import { isIP } from 'node:net';
 import type { AlertSettings } from './model';
+
+/** RFC1918 / loopback / link-local / metadata / ULA ranges the webhook may never hit. */
+function isPrivateAddress(ip: string): boolean {
+  if (isIP(ip) === 6) {
+    const v6 = ip.toLowerCase();
+    if (v6.startsWith('::ffff:')) return isPrivateAddress(v6.slice(7)); // v4-mapped
+    return (
+      v6 === '::1' ||
+      v6 === '::' ||
+      v6.startsWith('fe80:') || // link-local
+      v6.startsWith('fc') || // unique-local
+      v6.startsWith('fd')
+    );
+  }
+  const parts = ip.split('.').map(Number);
+  if (parts.length !== 4 || parts.some((n) => Number.isNaN(n))) return true; // unparseable → refuse
+  const [a, b] = parts as [number, number, number, number];
+  return (
+    a === 10 ||
+    a === 127 ||
+    a === 0 ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 169 && b === 254) || // link-local + cloud metadata (169.254.169.254)
+    (a === 100 && b >= 64 && b <= 127) // CGNAT
+  );
+}
+
+/**
+ * SSRF guard for the admin-configurable webhook: https only, and the
+ * resolved address must be public. Throws with a readable reason.
+ */
+export async function assertPublicWebhookUrl(raw: string): Promise<void> {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error('webhook URL is not a valid URL');
+  }
+  if (url.protocol !== 'https:') throw new Error('webhook URL must use https');
+  const host = url.hostname;
+  if (isIP(host) ? isPrivateAddress(host) : false) {
+    throw new Error('webhook URL must not point at a private address');
+  }
+  if (!isIP(host)) {
+    const resolved = await lookup(host, { all: true });
+    if (resolved.length === 0 || resolved.some((r) => isPrivateAddress(r.address))) {
+      throw new Error('webhook host resolves to a private address');
+    }
+  }
+}
 
 export interface AlertDeps {
   getSettings(): Promise<AlertSettings>;
@@ -54,6 +107,7 @@ export class AlertDispatcher {
 
     if (s.webhookEnabled && s.webhookUrl) {
       try {
+        await assertPublicWebhookUrl(s.webhookUrl);
         await fetch(s.webhookUrl, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },

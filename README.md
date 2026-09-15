@@ -65,7 +65,23 @@ pnpm --filter web test:e2e         # full end-to-end against simulated Telegram
 - A database-side watchdog (pg_cron) opens a `worker_offline` incident if heartbeats stop —
   it fires even when the worker itself is dead.
 - The queue lives in Postgres: delays, schedules and retries survive restarts, and the unique
-  `(route, message, kind)` constraint guarantees nothing is ever posted twice.
+  `(route, message, kind)` constraint guarantees nothing is ever posted twice. If the worker
+  is killed mid-send, the affected row is parked as **failed / unconfirmed** rather than
+  retried automatically — a delivered post must never be guessed at.
+- **Run exactly one worker instance.** The queue claim is multi-instance-safe, but send
+  pacing is in-process; two instances would drive a sender account at twice its rate.
+
+## Production checklist (before real traffic)
+
+1. **Supabase Auth → enable "Confirm email".** Invites are enforced in the database, but
+   without mailbox confirmation an attacker who guesses an invited email could claim it
+   before its owner signs up. With confirmation on, the membership link only happens after
+   the owner proves control of the inbox (`0005_review_hardening.sql`).
+2. Disable any other auth providers / public signups in the Supabase dashboard.
+3. Set a strong `SESSION_ENCRYPTION_KEY` and `WORKER_API_TOKEN`; never reuse dev values.
+4. Keep the worker's admin API (`:8788`) unreachable from the public internet — only the
+   dashboard's server-side proxy needs it.
+5. Make the GitHub repo private (org admin) and protect the `prod` branch.
 
 ## Branches
 

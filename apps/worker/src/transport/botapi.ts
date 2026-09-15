@@ -162,7 +162,7 @@ export class BotApiTransport implements Transport {
       for (const [i, srcId] of opts.srcMessageIds.entries()) {
         const res = await this.bot.api.copyMessage(chatId, fromChatId, srcId, {
           disable_notification: opts.silent,
-          ...(i === 0
+          ...(i === 0 && (opts.applyCaption ?? true)
             ? {
                 caption: opts.text.text,
                 caption_entities: toBotEntities(opts.text.entities) as never,
@@ -170,6 +170,7 @@ export class BotApiTransport implements Transport {
             : {}),
         });
         ids.push(res.message_id);
+        await opts.onSent?.(ids.slice());
       }
       return ids;
     } catch (err) {
@@ -188,6 +189,7 @@ export class BotApiTransport implements Transport {
           { disable_notification: opts.silent },
         );
         ids.push(res.message_id);
+        await opts.onSent?.(ids.slice());
       }
       return ids;
     } catch (err) {

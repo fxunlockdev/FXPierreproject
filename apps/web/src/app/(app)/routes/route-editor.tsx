@@ -22,6 +22,7 @@ import { Select } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList } from "@/components/ui/tabs";
 import { useUpdateRoute } from "@/lib/queries";
+import { useNow } from "@/lib/use-now";
 import type { AccountRow, ChannelRow, RouteRow } from "@/lib/types";
 
 const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -125,11 +126,12 @@ function TestTab({ state, masterTitle }: { state: EditorState; masterTitle: stri
   const [sample, setSample] = useState("EURUSD BUY NOW 🔥\nEntry 1.0850\nTP1 1.0900\nSL 1.0800\n\nJoin https://t.me/somechannel");
   const [media, setMedia] = useState<MediaKind>("text");
 
+  const now = useNow(60_000);
   const result = useMemo(() => {
     const msg = {
       chatId: "-100000",
       messageId: 1,
-      date: Math.floor(Date.now() / 1000),
+      date: Math.floor(now / 1000),
       media,
       text: richText(sample),
     };
@@ -139,13 +141,13 @@ function TestTab({ state, masterTitle }: { state: EditorState; masterTitle: stri
       messageLink: "https://t.me/master_channel/1",
     });
     const timing = resolveTiming(
-      new Date(),
+      new Date(now),
       state.delay_seconds,
       state.scheduleEnabled ? state.schedule : null,
       null,
     );
     return { content, timing };
-  }, [sample, media, state, masterTitle]);
+  }, [sample, media, state, masterTitle, now]);
 
   return (
     <div className="flex flex-col gap-4">

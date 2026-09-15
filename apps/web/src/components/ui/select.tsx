@@ -15,6 +15,7 @@ export function Select({
   placeholder = "Select…",
   disabled,
   className = "",
+  ...triggerProps
 }: {
   value: string | undefined;
   onValueChange: (value: string) => void;
@@ -22,10 +23,14 @@ export function Select({
   placeholder?: string;
   disabled?: boolean;
   className?: string;
-}) {
+} & Pick<
+  React.ComponentPropsWithoutRef<"button">,
+  "id" | "aria-label" | "aria-describedby" | "aria-invalid"
+>) {
   return (
     <RadixSelect.Root value={value} onValueChange={onValueChange} disabled={disabled}>
       <RadixSelect.Trigger
+        {...triggerProps}
         className={`flex h-9.5 items-center justify-between gap-2 rounded-lg border border-edge bg-surface px-3 text-sm text-ink transition-colors hover:border-edge-strong focus:border-live focus:outline-none disabled:opacity-45 data-[placeholder]:text-faint ${className}`}
       >
         <RadixSelect.Value placeholder={placeholder} />

@@ -18,6 +18,7 @@ import {
 import { useIncidents, useWorkerStatus } from "@/lib/queries";
 import { supabaseBrowser } from "@/lib/supabase/client";
 import { timeAgo } from "@/lib/format";
+import { useNow } from "@/lib/use-now";
 
 const NAV = [
   { href: "/overview", label: "Overview", icon: SquaresFour },
@@ -36,7 +37,8 @@ function WorkerPill() {
     undefined as (typeof workers extends (infer T)[] | undefined ? T : never) | undefined,
   );
 
-  const age = latest ? Date.now() - new Date(latest.heartbeat_at).getTime() : Infinity;
+  const now = useNow(15_000);
+  const age = latest ? now - new Date(latest.heartbeat_at).getTime() : Infinity;
   const state = age < 90_000 ? "online" : age < 300_000 ? "stale" : "offline";
   const color = state === "online" ? "bg-live" : state === "stale" ? "bg-warn" : "bg-danger";
   const label =

@@ -43,6 +43,7 @@ function LoginForm() {
       : null,
   );
   const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -51,13 +52,20 @@ function LoginForm() {
     const sb = supabaseBrowser();
     try {
       if (mode === "activate") {
-        const { error: signUpErr } = await sb.auth.signUp({ email, password });
+        const { data: signUpData, error: signUpErr } = await sb.auth.signUp({ email, password });
         if (signUpErr) {
           throw new Error(
             /invite-only|database error/i.test(signUpErr.message)
               ? "That email has not been invited. Ask an admin to add you first."
               : signUpErr.message,
           );
+        }
+        // With email confirmation enabled (production), signUp returns no
+        // session — the account activates via the link in their inbox.
+        if (!signUpData.session) {
+          setNotice("Almost there — open the confirmation link we just emailed you, then sign in.");
+          setMode("signin");
+          return;
         }
       }
       const { error: signInErr } = await sb.auth.signInWithPassword({ email, password });
@@ -109,6 +117,11 @@ function LoginForm() {
       {error && (
         <p role="alert" className="rounded-lg border border-danger/30 bg-danger-soft px-3 py-2 text-[13px] text-danger">
           {error}
+        </p>
+      )}
+      {notice && (
+        <p role="status" className="rounded-lg border border-live/30 bg-live-soft px-3 py-2 text-[13px] text-live">
+          {notice}
         </p>
       )}
 

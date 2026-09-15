@@ -9,6 +9,8 @@ const EnvSchema = z.object({
   SESSION_ENCRYPTION_KEY: z.string().min(32, 'SESSION_ENCRYPTION_KEY must be at least 32 chars'),
   WORKER_API_TOKEN: z.string().min(16, 'WORKER_API_TOKEN must be at least 16 chars'),
   PORT: z.coerce.number().int().default(8787),
+  /** Safety-net poll for config changes; realtime handles most reloads. */
+  CONFIG_POLL_SECONDS: z.coerce.number().int().min(1).default(30),
   SIMULATE: z
     .string()
     .default('0')

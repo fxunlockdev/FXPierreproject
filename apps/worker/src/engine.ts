@@ -22,6 +22,8 @@ export interface EngineOptions {
   backoffSeconds?: number[];
   /** Consecutive delivery failures before a route is auto-paused */
   autopauseAfter?: number;
+  /** Rows stuck in `sending` longer than this are parked as failed (never requeued). */
+  staleSendingSeconds?: number;
   clock?: () => Date;
 }
 
@@ -30,6 +32,7 @@ const DEFAULTS: Required<EngineOptions> = {
   maxAttempts: 5,
   backoffSeconds: [1, 5, 30, 120, 600],
   autopauseAfter: 3,
+  staleSendingSeconds: 180,
   clock: () => new Date(),
 };
 
@@ -146,7 +149,7 @@ export class RelayEngine {
     }
   }
 
-  private contextFor(master: Channel, msg: RelayMessage): PipelineContext {
+  private contextFor(master: Channel, msg: RelayMessage, route?: Route): PipelineContext {
     return {
       masterTitle: master.title,
       masterUsername: master.username,
@@ -154,6 +157,8 @@ export class RelayEngine {
         ? `https://t.me/${master.username}/${msg.messageId}`
         : undefined,
       now: this.opts.clock(),
+      // {date}/{time} variables render in the route's schedule timezone
+      tz: route?.schedule?.tz,
     };
   }
 
@@ -186,7 +191,7 @@ export class RelayEngine {
         mediaKind: primary.media,
       };
 
-      const result = applyRules(primary, route.rules, this.contextFor(master, primary));
+      const result = applyRules(primary, route.rules, this.contextFor(master, primary, route));
       if (result.action === 'drop') {
         await this.store.upsertForward({
           ...base,
@@ -235,10 +240,34 @@ export class RelayEngine {
 
     for (const route of this.routesByMaster.get(master.id) ?? []) {
       if (!route.enabled || !route.syncEdits || route.mode !== 'copy') continue;
-      const done = await this.store.findDone(route.id, msg.messageId);
-      if (!done?.destMessageIds?.length) continue;
+      const post = await this.store.findPost(route.id, msg.messageId);
+      if (!post) continue;
 
-      const result = applyRules(msg, route.rules, this.contextFor(master, msg));
+      const result = applyRules(msg, route.rules, this.contextFor(master, msg, route));
+
+      // The post hasn't reached the receiver yet (delay, schedule, retry
+      // backoff, in flight): refresh it in place so the edited content is
+      // what eventually goes out — an edit must never be silently lost.
+      if (post.state === 'queued' || post.state === 'scheduled' || post.state === 'held') {
+        if (result.action === 'drop') {
+          await this.store.updateForward(post.id, {
+            state: 'dropped',
+            dropReason: `edited into filtered content: ${result.reason}`,
+          });
+        } else {
+          await this.store.updateForward(post.id, {
+            payload: {
+              srcText: msg.text,
+              output: result.output,
+              removeButtons: result.removeButtons,
+            },
+            preview: result.output.text.slice(0, 200),
+          });
+        }
+        continue;
+      }
+
+      if (post.state !== 'done' || !post.destMessageIds?.length) continue;
       if (result.action === 'drop') continue; // edited into filtered content — leave the copy
 
       const payload: ForwardPayload = {
@@ -249,12 +278,12 @@ export class RelayEngine {
       await this.store.upsertForward({
         routeId: route.id,
         masterChannelId: master.id,
-        receiverChannelId: done.receiverChannelId,
+        receiverChannelId: post.receiverChannelId,
         srcMessageId: msg.messageId,
         kind: 'edit',
         state: 'queued',
         deliverAt: now,
-        destMessageIds: done.destMessageIds,
+        destMessageIds: post.destMessageIds,
         mediaKind: msg.media,
         preview: result.output.text.slice(0, 200),
         payload,
@@ -270,17 +299,29 @@ export class RelayEngine {
     for (const route of this.routesByMaster.get(master.id) ?? []) {
       if (!route.syncDeletes || route.mode !== 'copy') continue;
       for (const srcId of messageIds) {
-        const done = await this.store.findDone(route.id, srcId);
-        if (!done?.destMessageIds?.length) continue;
+        const post = await this.store.findPost(route.id, srcId);
+        if (!post) continue;
+
+        // Deleted at the source before we ever sent it — cancel the pending
+        // post instead of relaying content its author already retracted.
+        if (post.state === 'queued' || post.state === 'scheduled' || post.state === 'held') {
+          await this.store.updateForward(post.id, {
+            state: 'dropped',
+            dropReason: 'deleted at the source before sending',
+          });
+          continue;
+        }
+
+        if (post.state !== 'done' || !post.destMessageIds?.length) continue;
         await this.store.upsertForward({
           routeId: route.id,
           masterChannelId: master.id,
-          receiverChannelId: done.receiverChannelId,
+          receiverChannelId: post.receiverChannelId,
           srcMessageId: srcId,
           kind: 'delete',
           state: 'queued',
           deliverAt: now,
-          destMessageIds: done.destMessageIds,
+          destMessageIds: post.destMessageIds,
         });
       }
     }
@@ -311,9 +352,39 @@ export class RelayEngine {
   /** One sender-loop iteration. Returns how many rows it attempted. */
   async tick(): Promise<number> {
     const now = this.opts.clock();
+    await this.reapStaleSending(now);
     const due = await this.store.claimDue(now, 20);
     for (const f of due) await this.deliver(f);
     return due.length;
+  }
+
+  private lastReapAt = 0;
+
+  /**
+   * A row stuck in `sending` means the worker died (or lost storage) between
+   * the Telegram call and the completion write — the send MAY have gone
+   * through, so requeueing would risk a duplicate post. Park it as failed
+   * with a clear note; the operator can verify in Telegram and retry by hand.
+   */
+  private async reapStaleSending(now: Date): Promise<void> {
+    if (now.getTime() - this.lastReapAt < 60_000) return;
+    this.lastReapAt = now.getTime();
+    try {
+      const parked = await this.store.parkStaleSending(
+        new Date(now.getTime() - this.opts.staleSendingSeconds * 1000),
+        'delivery unconfirmed — the worker was interrupted mid-send; check the receiver channel before retrying',
+      );
+      if (parked > 0) {
+        console.warn(`[engine] parked ${parked} unconfirmed forward(s) stuck in sending`);
+        await this.store.notify(
+          'worker',
+          'Unconfirmed deliveries',
+          `${parked} forward(s) were interrupted mid-send and parked as failed. Check the receiver channel before retrying them.`,
+        );
+      }
+    } catch (err) {
+      console.error('[engine] stale-sending reap failed:', err);
+    }
   }
 
   private pickReader(master: Channel): Transport | undefined {
@@ -395,16 +466,23 @@ export class RelayEngine {
       await this.store.updateForward(f.id, { state: 'queued', deliverAt: new Date(slot) });
       return;
     }
-    const interval = 60_000 / this.ratePerMinute(sender.accountId);
+    // the simulator has no real rate limit — production pacing would make
+    // demo/e2e deliveries crawl at 3s per message
+    const interval =
+      sender.kind === 'sim' ? 0 : 60_000 / this.ratePerMinute(sender.accountId);
     this.nextSlotByReceiver.set(receiver.id, now + interval);
     this.nextSlotByAccount.set(sender.accountId, now + interval / 4);
 
     const payload = f.payload as ForwardPayload | undefined;
 
+    // Only the Telegram call itself may route into handleDeliveryError.
+    // Once Telegram has accepted the send, a storage hiccup must never
+    // requeue the row — that would double-post it.
+    let done: Partial<ForwardRecord>;
     try {
       if (f.kind === 'delete') {
         await sender.deleteMessages(receiver.tgChatId, f.destMessageIds ?? []);
-        await this.store.updateForward(f.id, { state: 'done' });
+        done = {};
       } else if (f.kind === 'edit') {
         const target = f.destMessageIds?.[0];
         if (target === undefined || !payload) {
@@ -412,21 +490,51 @@ export class RelayEngine {
           return;
         }
         await sender.editCopy(receiver.tgChatId, target, payload.output, f.mediaKind ?? 'text');
-        await this.store.updateForward(f.id, { state: 'done' });
+        done = {};
       } else {
         const destIds = await this.sendPost(f, route, master, receiver, sender, payload);
-        await this.store.updateForward(f.id, {
-          state: 'done',
+        done = {
           destMessageIds: destIds,
-          senderAccountId: sender.accountId,
+          // the simulator has no telegram_accounts row — its literal id
+          // must never reach the uuid column
+          senderAccountId: sender.kind === 'sim' ? undefined : sender.accountId,
           latencyMs: this.opts.clock().getTime() - f.createdAt.getTime(),
-        });
+        };
       }
-      this.consecutiveFails.delete(route.id);
+    } catch (err) {
+      await this.handleDeliveryError(f, route, master, receiver, err);
+      return;
+    }
+
+    await this.confirmDelivered(f.id, done);
+    this.consecutiveFails.delete(route.id);
+    try {
       await this.store.setChannelHealth(receiver.id, 'ok');
       await this.store.resolveIncidents('receiver_no_permission', { channelId: receiver.id });
     } catch (err) {
-      await this.handleDeliveryError(f, route, master, receiver, err);
+      // Bookkeeping only — never let it disturb a delivered forward.
+      console.error('[engine] post-delivery bookkeeping failed:', err);
+    }
+  }
+
+  /**
+   * Persist the terminal `done` state after a successful Telegram send.
+   * Retries a few times; if storage stays down, the row remains `sending`
+   * and the stale-sending reaper parks it as unconfirmed — it is NEVER
+   * requeued, because the post is already out.
+   */
+  private async confirmDelivered(id: string, patch: Partial<ForwardRecord>): Promise<void> {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        await this.store.updateForward(id, { ...patch, state: 'done' });
+        return;
+      } catch (err) {
+        if (attempt === 2) {
+          console.error(`[engine] forward ${id} delivered but completion write kept failing:`, err);
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+      }
     }
   }
 
@@ -438,15 +546,37 @@ export class RelayEngine {
     sender: Transport,
     payload: ForwardPayload | undefined,
   ): Promise<number[]> {
-    const srcIds = f.srcMessageIds?.length ? f.srcMessageIds : [f.srcMessageId];
+    const srcAll = f.srcMessageIds?.length ? f.srcMessageIds : [f.srcMessageId];
+
+    // Album resume: items delivered on a previous attempt (Bot API sends
+    // albums item by item and can fail mid-loop) are checkpointed into
+    // dest_message_ids as they land, and never re-sent on retry.
+    const already = f.destMessageIds ?? [];
+    const skip = already.length;
+    if (skip >= srcAll.length) return already; // everything already went out
+    const srcIds = skip > 0 ? srcAll.slice(skip) : srcAll;
+
+    const checkpoint = async (sentSoFar: number[]) => {
+      try {
+        await this.store.updateForward(f.id, { destMessageIds: [...already, ...sentSoFar] });
+      } catch {
+        // best-effort: a lost checkpoint at worst re-sends one album item
+      }
+    };
+
     const common = {
       toChatId: receiver.tgChatId!,
       silent: route.silent,
       mediaKind: f.mediaKind ?? 'text',
+      onSent: checkpoint,
+      // The transformed caption belongs to the album's first item; on a
+      // resume that item is already out, so nothing gets re-captioned.
+      applyCaption: skip === 0,
     };
 
     if (route.mode === 'forward') {
-      return sender.forward({ ...common, fromChatId: master.tgChatId!, srcMessageIds: srcIds });
+      const sent = await sender.forward({ ...common, fromChatId: master.tgChatId!, srcMessageIds: srcIds });
+      return [...already, ...sent];
     }
 
     const output = payload?.output ?? { text: '', entities: [] };
@@ -462,9 +592,11 @@ export class RelayEngine {
         if (!bufIds) {
           const reader = this.pickReader(master);
           if (reader) {
+            // Always copy the FULL album into the buffer so cached buffer ids
+            // stay 1:1 with the source list even when a resume skips items.
             bufIds = await reader.copy({
               fromChatId: master.tgChatId!,
-              srcMessageIds: srcIds,
+              srcMessageIds: srcAll,
               toChatId: buffer.tgChatId,
               text: payload?.srcText ?? output,
               silent: true,
@@ -479,24 +611,26 @@ export class RelayEngine {
           }
         }
         if (bufIds) {
-          return sender.copy({
+          const sent = await sender.copy({
             ...common,
             fromChatId: buffer.tgChatId,
-            srcMessageIds: bufIds,
+            srcMessageIds: skip > 0 ? bufIds.slice(skip) : bufIds,
             text: output,
             removeButtons,
           });
+          return [...already, ...sent];
         }
       }
     }
 
-    return sender.copy({
+    const sent = await sender.copy({
       ...common,
       fromChatId: master.tgChatId!,
       srcMessageIds: srcIds,
       text: output,
       removeButtons,
     });
+    return [...already, ...sent];
   }
 
   private async handleDeliveryError(

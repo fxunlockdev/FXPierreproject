@@ -59,7 +59,11 @@ interface PendingLogin {
   client: TelegramClient;
   codeResolve?: (code: string) => void;
   passwordResolve?: (pw: string) => void;
+  createdAt: number;
 }
+
+/** Abandoned phone-login sessions are swept after this long. */
+const LOGIN_TTL_MS = 15 * 60_000;
 
 const safeEqual = (a: string, b: string): boolean => {
   const bufA = Buffer.from(a);
@@ -102,7 +106,22 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     const client = new TelegramClient(new StringSession(''), env.TELEGRAM_API_ID, env.TELEGRAM_API_HASH, {
       connectionRetries: 3,
     });
-    const pending: PendingLogin = { id, phone: body.phone, label: body.label, phase: 'starting', client };
+    // sweep abandoned logins so the map (and their sockets) can't leak
+    for (const [key, stale] of logins) {
+      if (Date.now() - stale.createdAt > LOGIN_TTL_MS) {
+        void stale.client.destroy().catch(() => {});
+        logins.delete(key);
+      }
+    }
+
+    const pending: PendingLogin = {
+      id,
+      phone: body.phone,
+      label: body.label,
+      phase: 'starting',
+      client,
+      createdAt: Date.now(),
+    };
     logins.set(id, pending);
 
     void client
@@ -315,7 +334,9 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
 
   if (env.SIMULATE && sim) {
     const firstMaster = () =>
-      engine.config.channels.find((c) => c.role === 'master' && c.enabled && c.tgChatId);
+      engine.config.channels.find(
+        (c) => c.role === 'master' && c.enabled && c.tgChatId && !c.isProtected,
+      );
 
     app.post('/sim/post', async (req, reply) => {
       const body = z
@@ -325,6 +346,9 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
           media: z.enum(['text', 'photo', 'video', 'document']).default('text'),
         })
         .parse(req.body);
+      // an explicit injection must see channels/routes saved a moment ago,
+      // even if the realtime config push hasn't landed yet
+      await engine.reload();
       const chatId = body.chatTgId ?? firstMaster()?.tgChatId;
       if (!chatId) return reply.code(409).send({ error: 'no enabled master channel to post into' });
       const msg = await sim.injectPost(chatId, body.text, { media: body.media });
@@ -335,6 +359,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       const body = z
         .object({ chatTgId: z.string(), messageId: z.number().int(), text: z.string().max(4096) })
         .parse(req.body);
+      await engine.reload();
       await sim.injectEdit(body.chatTgId, body.messageId, body.text);
       return { ok: true };
     });
@@ -343,6 +368,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       const body = z
         .object({ chatTgId: z.string(), messageIds: z.array(z.number().int()).min(1) })
         .parse(req.body);
+      await engine.reload();
       await sim.injectDelete(body.chatTgId, body.messageIds);
       return { ok: true };
     });

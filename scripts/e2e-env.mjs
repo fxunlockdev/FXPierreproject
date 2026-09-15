@@ -73,6 +73,7 @@ export function writeEnvFiles(env) {
       `WORKER_API_TOKEN=${env.workerToken}`,
       `PORT=8788`,
       `SIMULATE=1`,
+      `CONFIG_POLL_SECONDS=2`,
       "",
     ].join("\n"),
   );

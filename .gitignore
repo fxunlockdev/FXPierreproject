@@ -36,3 +36,4 @@ next-env.d.ts
 
 # e2e local credentials
 .e2e-env.json
+.playwright/

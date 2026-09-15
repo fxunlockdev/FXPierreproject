@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { toast } from "sonner";
 import { BellRinging, CheckCircle, PaperPlaneTilt, Warning } from "@phosphor-icons/react";
 import { EmptyState, SectionHeader, Skeleton } from "@/components/ui/bits";
@@ -26,34 +26,26 @@ const TRIGGER_HINTS: Record<string, string> = {
 
 function DeliverySettings() {
   const { data: settings, isLoading } = useAlertSettings();
-  const update = useUpdateAlertSettings();
-  const [form, setForm] = useState({
-    telegram_enabled: true,
-    telegram_target: "",
-    webhook_enabled: false,
-    webhook_url: "",
-    email_enabled: false,
-    email_to: "",
-    cooldown_minutes: 15,
-  });
-  const [triggers, setTriggers] = useState<Record<string, boolean>>({});
-  const [testing, setTesting] = useState(false);
-
-  useEffect(() => {
-    if (!settings) return;
-    setForm({
-      telegram_enabled: settings.telegram_enabled,
-      telegram_target: settings.telegram_target ?? "",
-      webhook_enabled: settings.webhook_enabled,
-      webhook_url: settings.webhook_url ?? "",
-      email_enabled: settings.email_enabled,
-      email_to: settings.email_to ?? "",
-      cooldown_minutes: settings.cooldown_minutes,
-    });
-    setTriggers(settings.triggers ?? {});
-  }, [settings]);
-
   if (isLoading || !settings) return <Skeleton className="h-72" />;
+  return <DeliveryForm settings={settings} />;
+}
+
+type AlertSettingsRow = NonNullable<ReturnType<typeof useAlertSettings>["data"]>;
+
+function DeliveryForm({ settings }: { settings: AlertSettingsRow }) {
+  const update = useUpdateAlertSettings();
+  // Seeded from the server row once — refetches must not stomp in-progress edits.
+  const [form, setForm] = useState({
+    telegram_enabled: settings.telegram_enabled,
+    telegram_target: settings.telegram_target ?? "",
+    webhook_enabled: settings.webhook_enabled,
+    webhook_url: settings.webhook_url ?? "",
+    email_enabled: settings.email_enabled,
+    email_to: settings.email_to ?? "",
+    cooldown_minutes: settings.cooldown_minutes,
+  });
+  const [triggers, setTriggers] = useState<Record<string, boolean>>(settings.triggers ?? {});
+  const [testing, setTesting] = useState(false);
 
   const save = (e: React.FormEvent) => {
     e.preventDefault();

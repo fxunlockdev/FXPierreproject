@@ -17,7 +17,9 @@ function RealtimeBridge() {
       if (existing) clearTimeout(existing);
       timers.current.set(
         key,
-        setTimeout(() => void qc.invalidateQueries({ queryKey: [key] }), 250),
+        // 1s debounce: forwards mutate several times per message under load,
+        // and every open tab refetches on invalidation — don't storm the API.
+        setTimeout(() => void qc.invalidateQueries({ queryKey: [key] }), 1000),
       );
     };
 

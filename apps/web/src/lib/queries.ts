@@ -2,6 +2,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
+import { findRouteRulesProblem, RouteScheduleSchema } from "@pierre/core";
 import { supabaseBrowser } from "./supabase/client";
 import type {
   AccountRow,
@@ -39,7 +40,7 @@ export const useAccounts = () =>
 export const useWorkerStatus = () =>
   useQuery({
     queryKey: ["worker_status"],
-    queryFn: () => selectAll<WorkerStatusRow>("worker_status", "heartbeat_at"),
+    queryFn: () => selectAll<WorkerStatusRow>("worker_status", "heartbeat_at", false, 20),
     refetchInterval: 15_000,
   });
 
@@ -52,6 +53,9 @@ export interface ForwardFilters {
 export const useForwards = (filters: ForwardFilters = {}, limit = 200) =>
   useQuery({
     queryKey: ["forwards", filters, limit],
+    // realtime invalidation is the fast path; this poll is the floor so the
+    // log still moves when the websocket is unavailable
+    refetchInterval: 5_000,
     queryFn: async () => {
       let q = sb().from("forwards").select("*").order("created_at", { ascending: false }).limit(limit);
       if (filters.state) q = q.eq("state", filters.state);
@@ -66,6 +70,7 @@ export const useForwards = (filters: ForwardFilters = {}, limit = 200) =>
 export const useForwardsToday = () =>
   useQuery({
     queryKey: ["forwards", "today"],
+    refetchInterval: 15_000,
     queryFn: async () => {
       const since = new Date();
       since.setHours(0, 0, 0, 0);
@@ -78,15 +83,19 @@ export const useForwardsToday = () =>
       if (error) throw new Error(error.message);
       return (data ?? []) as Pick<ForwardRow, "id" | "state" | "kind" | "latency_ms" | "created_at" | "drop_reason">[];
     },
-    refetchInterval: 30_000,
   });
 
 export const useIncidents = () =>
-  useQuery({ queryKey: ["incidents"], queryFn: () => selectAll<IncidentRow>("incidents", "last_seen", false, 100) });
+  useQuery({
+    queryKey: ["incidents"],
+    refetchInterval: 15_000,
+    queryFn: () => selectAll<IncidentRow>("incidents", "last_seen", false, 100),
+  });
 
 export const useNotifications = () =>
   useQuery({
     queryKey: ["notifications"],
+    refetchInterval: 30_000,
     queryFn: () => selectAll<NotificationRow>("notifications", "created_at", false, 50),
   });
 
@@ -193,6 +202,21 @@ export function useUpdateRoute() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async ({ id, patch }: { id: string; patch: Partial<RouteRow> }) => {
+      // Validate BEFORE writing — the worker treats invalid rules/schedules as
+      // "off", so a bad row would silently change relay behavior.
+      if ("rules" in patch) {
+        const problem = findRouteRulesProblem(patch.rules);
+        if (problem) throw new Error(problem);
+      }
+      if (patch.schedule !== null && patch.schedule !== undefined) {
+        const parsed = RouteScheduleSchema.safeParse(patch.schedule);
+        if (!parsed.success) {
+          const issue = parsed.error.issues[0];
+          throw new Error(
+            issue ? `schedule ${issue.path.join(".")}: ${issue.message}` : "invalid schedule",
+          );
+        }
+      }
       const { error } = await sb().from("routes").update(patch).eq("id", id);
       if (error) throw new Error(error.message);
     },

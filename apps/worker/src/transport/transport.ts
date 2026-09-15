@@ -31,6 +31,17 @@ export interface SendOptions {
   silent: boolean;
   removeButtons: boolean;
   mediaKind: string;
+  /**
+   * Checkpoint callback: transports that send albums item by item (Bot API)
+   * MUST await it after each item with all dest ids so far, so the engine can
+   * persist progress and a retry never re-sends delivered items.
+   */
+  onSent?: (destIdsSoFar: number[]) => void | Promise<void>;
+  /**
+   * false on album resumes — the caption went out with the first item on a
+   * previous attempt, so no item of this batch may carry it. Default true.
+   */
+  applyCaption?: boolean;
 }
 
 export interface ResolvedChannel {

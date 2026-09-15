@@ -38,10 +38,11 @@ export class SupabaseStore implements Store {
 
   async loadConfig(): Promise<RelayConfig> {
     const [accounts, channels, memberships, routes] = await Promise.all([
-      this.sb.from('telegram_accounts').select('*'),
-      this.sb.from('channels').select('*'),
+      // deterministic order — Postgres heap order shifts as rows are updated
+      this.sb.from('telegram_accounts').select('*').order('created_at'),
+      this.sb.from('channels').select('*').order('created_at'),
       this.sb.from('channel_memberships').select('*'),
-      this.sb.from('routes').select('*'),
+      this.sb.from('routes').select('*').order('created_at'),
     ]);
     this.fail('accounts', accounts.error);
     this.fail('channels', channels.error);
@@ -91,11 +92,15 @@ export class SupabaseStore implements Store {
         senderAccountId: (r['sender_account_id'] as string) ?? null,
         useFanout: r['use_fanout'] as boolean,
         delaySeconds: r['delay_seconds'] as number,
-        schedule: parseRouteSchedule(r['schedule']),
+        schedule: parseRouteSchedule(r['schedule'], (detail) =>
+          console.warn(`[store] route ${r['id']} has an invalid schedule (ignored): ${detail}`),
+        ),
         pausedUntil: r['paused_until'] ? new Date(r['paused_until'] as string) : null,
         syncEdits: r['sync_edits'] as boolean,
         syncDeletes: r['sync_deletes'] as boolean,
-        rules: parseRouteRules(r['rules']),
+        rules: parseRouteRules(r['rules'], (detail) =>
+          console.warn(`[store] route ${r['id']} has invalid rules (defaults used): ${detail}`),
+        ),
       })),
     };
   }
@@ -193,18 +198,43 @@ export class SupabaseStore implements Store {
     return ((data as Row[]) ?? []).map((r) => this.fromRow(r));
   }
 
-  async findDone(routeId: string, srcMessageId: number): Promise<ForwardRecord | null> {
+  async parkStaleSending(before: Date, note: string): Promise<number> {
     const { data, error } = await this.sb
       .from('forwards')
-      .select('*')
+      .update({ state: 'failed', last_error: note })
+      .eq('state', 'sending')
+      .lt('updated_at', before.toISOString())
+      .select('id');
+    this.fail('parkStaleSending', error);
+    return (data ?? []).length;
+  }
+
+  async findPost(
+    routeId: string,
+    srcMessageId: number,
+  ): Promise<{
+    id: string;
+    state: ForwardRecord['state'];
+    receiverChannelId: string;
+    destMessageIds?: number[];
+  } | null> {
+    const { data, error } = await this.sb
+      .from('forwards')
+      .select('id, state, receiver_channel_id, dest_message_ids')
       .eq('route_id', routeId)
       .eq('kind', 'post')
-      .eq('state', 'done')
       .or(`src_message_id.eq.${srcMessageId},src_message_ids.cs.{${srcMessageId}}`)
+      .order('created_at', { ascending: false })
       .limit(1);
-    this.fail('findDone', error);
+    this.fail('findPost', error);
     const row = (data as Row[] | null)?.[0];
-    return row ? this.fromRow(row) : null;
+    if (!row) return null;
+    return {
+      id: row['id'] as string,
+      state: row['state'] as ForwardRecord['state'],
+      receiverChannelId: row['receiver_channel_id'] as string,
+      destMessageIds: (row['dest_message_ids'] as number[] | null)?.map(Number),
+    };
   }
 
   async countPending(): Promise<number> {

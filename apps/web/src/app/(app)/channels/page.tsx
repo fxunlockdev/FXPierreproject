@@ -1,10 +1,11 @@
 "use client";
 
 import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Broadcast, DotsThreeVertical, LockKey, Plus } from "@phosphor-icons/react";
 import * as Dropdown from "@radix-ui/react-dropdown-menu";
-import { Badge, HealthDot } from "@/components/ui/badge";
+import { HealthDot } from "@/components/ui/badge";
 import { EmptyState, SectionHeader, Skeleton } from "@/components/ui/bits";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTrigger } from "@/components/ui/dialog";
@@ -37,6 +38,7 @@ function AddChannelDialog() {
   const [ref, setRef] = useState("");
   const [busy, setBusy] = useState(false);
   const insert = useInsertChannel();
+  const qc = useQueryClient();
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -74,6 +76,8 @@ function AddChannelDialog() {
           `Channel saved. ${err instanceof Error ? err.message : "Verification will happen once the relay connects."}`,
         );
       }
+      // the resolve call just rewrote the row server-side — don't wait for realtime
+      void qc.invalidateQueries({ queryKey: ["channels"] });
       setRef("");
       setOpen(false);
       insert.reset();

@@ -10,7 +10,10 @@ export default defineConfig({
   expect: { timeout: 15_000 },
   retries: process.env.CI ? 2 : 0,
   workers: 1, // specs share one database — keep them serial
-  reporter: [["list"], ["html", { open: "never" }]],
+  // Artifacts live outside the package so ESLint/Next never scan the
+  // bundled viewer JS that Playwright emits into its reports.
+  outputDir: "../../.playwright/test-results",
+  reporter: [["list"], ["html", { open: "never", outputFolder: "../../.playwright/report" }]],
   use: {
     baseURL: "http://127.0.0.1:3100",
     trace: "retain-on-failure",

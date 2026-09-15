@@ -27,14 +27,12 @@ async function main() {
   }
 
   // reset relay data so every run starts clean
-  for (const table of ["forwards", "routes", "channels", "incidents", "notifications", "worker_status", "audit_log"]) {
-    const { error } = await admin.from(table).delete().gte("created_at", "1970-01-01").select("*").limit(0);
-    if (error && !/column .* does not exist/.test(error.message)) {
-      // worker_status has no created_at — fall back to instance filter
-      const fallback = await admin.from(table).delete().neq("instance_id", "");
-      if (fallback.error) throw new Error(`reset ${table}: ${error.message}`);
-    }
+  for (const table of ["forwards", "routes", "channels", "incidents", "notifications", "audit_log"]) {
+    const { error } = await admin.from(table).delete().not("id", "is", null);
+    if (error) throw new Error(`reset ${table}: ${error.message}`);
   }
+  const ws = await admin.from("worker_status").delete().neq("instance_id", "");
+  if (ws.error) throw new Error(`reset worker_status: ${ws.error.message}`);
 
   // provision the signed-in admin (confirmed), and make sure the "activate me"
   // user does NOT exist yet so the invite-activation flow can be tested

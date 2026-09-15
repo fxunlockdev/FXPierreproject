@@ -9,6 +9,7 @@ export async function supabaseServer(): Promise<SupabaseClient> {
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
+      cookieOptions: { sameSite: "lax", secure: process.env.NODE_ENV === "production" },
       cookies: {
         getAll: () => cookieStore.getAll(),
         setAll: (list) => {
