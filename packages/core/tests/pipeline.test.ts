@@ -5,7 +5,7 @@ import {
   richText,
   type PipelineContext,
   type RelayMessage,
-} from '../src/index.js';
+} from '../src/index';
 
 const msg = (text: string, media: RelayMessage['media'] = 'text'): RelayMessage => ({
   chatId: '-100999',

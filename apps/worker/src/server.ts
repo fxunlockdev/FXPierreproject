@@ -4,15 +4,15 @@ import { z } from 'zod';
 import { TelegramClient } from 'telegram';
 import { StringSession } from 'telegram/sessions/index.js';
 import { Bot } from 'grammy';
-import type { AlertDispatcher } from './alerts.js';
-import { encryptSecret } from './crypto.js';
-import type { Env } from './env.js';
-import type { RelayEngine } from './engine.js';
-import type { Store } from './store/store.js';
-import { BotApiTransport } from './transport/botapi.js';
-import { GramJsTransport } from './transport/gramjs.js';
-import type { SimTransport } from './transport/sim.js';
-import { TransportError, type Transport } from './transport/transport.js';
+import type { AlertDispatcher } from './alerts';
+import { encryptSecret } from './crypto';
+import type { Env } from './env';
+import type { RelayEngine } from './engine';
+import type { Store } from './store/store';
+import { BotApiTransport } from './transport/botapi';
+import { GramJsTransport } from './transport/gramjs';
+import type { SimTransport } from './transport/sim';
+import { TransportError, type Transport } from './transport/transport';
 
 export interface AdminOps {
   insertAccount(fields: {

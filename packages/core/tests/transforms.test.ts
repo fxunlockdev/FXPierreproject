@@ -5,7 +5,7 @@ import {
   LinkRemovalSchema,
   richText,
   stripSignature,
-} from '../src/index.js';
+} from '../src/index';
 
 const link = (input: object) => LinkRemovalSchema.parse(input);
 

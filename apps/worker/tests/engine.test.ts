@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { parseRouteRules, parseRouteSchedule } from '@pierre/core';
-import { RelayEngine } from '../src/engine.js';
-import { MemoryStore } from '../src/store/memory-store.js';
-import { SimTransport } from '../src/transport/sim.js';
-import type { RelayConfig, Route } from '../src/model.js';
+import { RelayEngine } from '../src/engine';
+import { MemoryStore } from '../src/store/memory-store';
+import { SimTransport } from '../src/transport/sim';
+import type { RelayConfig, Route } from '../src/model';
 
 const MASTER_TG = '-100111';
 const RECEIVER1_TG = '-100222';

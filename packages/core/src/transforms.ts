@@ -1,7 +1,7 @@
-import { spliceText, tidyWhitespace } from './richtext.js';
-import { safeRegex } from './filters.js';
-import type { RichText } from './types.js';
-import type { LinkRemoval, Replacement } from './rules.js';
+import { spliceText, tidyWhitespace } from './richtext';
+import { safeRegex } from './filters';
+import type { RichText } from './types';
+import type { LinkRemoval, Replacement } from './rules';
 
 const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 

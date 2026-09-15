@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { resolveTiming, RouteScheduleSchema, type RouteSchedule } from '../src/index.js';
+import { resolveTiming, RouteScheduleSchema, type RouteSchedule } from '../src/index';
 
 // Monday 2026-09-14 10:00 UTC
 const MONDAY_10 = new Date('2026-09-14T10:00:00Z');

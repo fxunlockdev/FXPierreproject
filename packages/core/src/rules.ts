@@ -1,10 +1,10 @@
 import { z } from 'zod';
 import { DateTime } from 'luxon';
-import { MEDIA_KINDS, type PipelineContext, type RelayMessage, type RichText } from './types.js';
-import { checkFilters } from './filters.js';
-import { applyLinkRemoval, applyReplacements, stripSignature } from './transforms.js';
-import { appendRichText, prependRichText, tidyWhitespace, truncateRichText } from './richtext.js';
-import { expandVariables, parseMiniMarkdown } from './mini-markdown.js';
+import { MEDIA_KINDS, type PipelineContext, type RelayMessage, type RichText } from './types';
+import { checkFilters } from './filters';
+import { applyLinkRemoval, applyReplacements, stripSignature } from './transforms';
+import { appendRichText, prependRichText, tidyWhitespace, truncateRichText } from './richtext';
+import { expandVariables, parseMiniMarkdown } from './mini-markdown';
 
 /** Telegram hard limits */
 export const MAX_TEXT_LENGTH = 4096;

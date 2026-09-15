@@ -1,4 +1,4 @@
-import type { AlertSettings } from './model.js';
+import type { AlertSettings } from './model';
 
 export interface AlertDeps {
   getSettings(): Promise<AlertSettings>;

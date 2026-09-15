@@ -1,4 +1,4 @@
-import type { Entity, RichText } from './types.js';
+import type { Entity, RichText } from './types';
 
 /**
  * Immutable splice on entity-annotated text. Replaces [start, end) with

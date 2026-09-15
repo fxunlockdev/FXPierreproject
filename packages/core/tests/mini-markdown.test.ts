@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { expandVariables, parseMiniMarkdown } from '../src/index.js';
+import { expandVariables, parseMiniMarkdown } from '../src/index';
 
 describe('parseMiniMarkdown', () => {
   it('parses bold, italic, code and links', () => {

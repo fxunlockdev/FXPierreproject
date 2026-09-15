@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { decryptSecret, encryptSecret } from '../src/crypto.js';
+import { decryptSecret, encryptSecret } from '../src/crypto';
 
 const KEY = 'a-test-only-encryption-key-32-chars!';
 

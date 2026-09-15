@@ -1,14 +1,14 @@
 import { hostname } from 'node:os';
-import { AlertDispatcher } from './alerts.js';
-import { decryptSecret } from './crypto.js';
-import { RelayEngine } from './engine.js';
-import { loadEnv } from './env.js';
-import { buildServer } from './server.js';
-import { SupabaseStore } from './store/supabase-store.js';
-import { BotApiTransport } from './transport/botapi.js';
-import { GramJsTransport } from './transport/gramjs.js';
-import { SimTransport } from './transport/sim.js';
-import type { Transport } from './transport/transport.js';
+import { AlertDispatcher } from './alerts';
+import { decryptSecret } from './crypto';
+import { RelayEngine } from './engine';
+import { loadEnv } from './env';
+import { buildServer } from './server';
+import { SupabaseStore } from './store/supabase-store';
+import { BotApiTransport } from './transport/botapi';
+import { GramJsTransport } from './transport/gramjs';
+import { SimTransport } from './transport/sim';
+import type { Transport } from './transport/transport';
 
 const VERSION = '0.1.0';
 

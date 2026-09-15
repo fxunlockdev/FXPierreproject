@@ -7,7 +7,7 @@ import {
   type SendOptions,
   type Transport,
   type TransportErrorCode,
-} from './transport.js';
+} from './transport';
 
 export interface SentRecord {
   toChatId: string;

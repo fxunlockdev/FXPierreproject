@@ -6,7 +6,7 @@ import type {
   IncidentKind,
   NewForward,
   RelayConfig,
-} from '../model.js';
+} from '../model';
 
 export interface IncidentRefs {
   channelId?: string;

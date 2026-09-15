@@ -1,5 +1,5 @@
 import { DateTime } from 'luxon';
-import type { RouteSchedule } from './rules.js';
+import type { RouteSchedule } from './rules';
 
 export type TimingDecision =
   | { action: 'send' }

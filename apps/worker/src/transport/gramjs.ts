@@ -10,7 +10,7 @@ import {
   type ResolvedChannel,
   type SendOptions,
   type Transport,
-} from './transport.js';
+} from './transport';
 
 type GramMessage = Api.Message;
 

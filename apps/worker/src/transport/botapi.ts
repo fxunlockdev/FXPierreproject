@@ -7,7 +7,7 @@ import {
   type ResolvedChannel,
   type SendOptions,
   type Transport,
-} from './transport.js';
+} from './transport';
 
 type BotEntity = NonNullable<Message['entities']>[number];
 

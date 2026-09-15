@@ -1,26 +1,171 @@
 @import "tailwindcss";
 
+/* ── Switchyard design tokens ─────────────────────────────────────────────
+   Dark-first operator console. One live-green accent; amber and red are
+   reserved for real problems. Light theme is a first-class citizen. */
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --bg: #0b0e12;
+  --surface: #10141a;
+  --raised: #161c24;
+  --edge: #202834;
+  --edge-strong: #2c3644;
+  --ink: #e8edf4;
+  --mute: #8b96a5;
+  --faint: #5a6472;
+  --live: #3fbf7f;
+  --live-soft: rgba(63, 191, 127, 0.12);
+  --warn: #d9a03f;
+  --warn-soft: rgba(217, 160, 63, 0.12);
+  --danger: #e5484d;
+  --danger-soft: rgba(229, 72, 77, 0.12);
+  --overlay: rgba(4, 6, 9, 0.72);
+}
+
+:root.light {
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --raised: #ffffff;
+  --edge: #e5e8ee;
+  --edge-strong: #d3d9e2;
+  --ink: #161d27;
+  --mute: #5c6878;
+  --faint: #98a2b1;
+  --live: #199662;
+  --live-soft: rgba(25, 150, 98, 0.1);
+  --warn: #a4700e;
+  --warn-soft: rgba(164, 112, 14, 0.1);
+  --danger: #cf3338;
+  --danger-soft: rgba(207, 51, 56, 0.08);
+  --overlay: rgba(23, 29, 38, 0.4);
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-raised: var(--raised);
+  --color-edge: var(--edge);
+  --color-edge-strong: var(--edge-strong);
+  --color-ink: var(--ink);
+  --color-mute: var(--mute);
+  --color-faint: var(--faint);
+  --color-live: var(--live);
+  --color-live-soft: var(--live-soft);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-overlay: var(--overlay);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+html {
+  color-scheme: dark;
+}
+html.light {
+  color-scheme: light;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  font-feature-settings: "ss01", "cv05";
+}
+
+::selection {
+  background: var(--live);
+  color: #06130c;
+}
+
+/* numbers should always sit in a grid */
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* thin, quiet scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--edge-strong) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--edge-strong);
+  border-radius: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* focus ring: visible, single accent */
+:focus-visible {
+  outline: 2px solid var(--live);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* live pulse dot */
+@keyframes sy-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 var(--live-soft);
+  }
+  50% {
+    box-shadow: 0 0 0 5px var(--live-soft);
+  }
+}
+.pulse-live {
+  animation: sy-pulse 2.4s ease-in-out infinite;
+}
+
+/* skeleton shimmer */
+@keyframes sy-shimmer {
+  0% {
+    background-position: -400px 0;
+  }
+  100% {
+    background-position: 400px 0;
+  }
+}
+.shimmer {
+  background: linear-gradient(
+    90deg,
+    var(--raised) 0%,
+    var(--edge) 40%,
+    var(--raised) 80%
+  );
+  background-size: 800px 100%;
+  animation: sy-shimmer 1.6s linear infinite;
+}
+
+/* signal travelling along a route link */
+@keyframes sy-signal {
+  from {
+    stroke-dashoffset: 24;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+.signal-line {
+  stroke-dasharray: 4 20;
+  animation: sy-signal 1.2s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pulse-live,
+  .shimmer,
+  .signal-line {
+    animation: none;
+  }
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
 }

@@ -8,8 +8,8 @@ import type {
   IncidentKind,
   NewForward,
   RelayConfig,
-} from '../model.js';
-import type { IncidentRefs, Store } from './store.js';
+} from '../model';
+import type { IncidentRefs, Store } from './store';
 
 type Row = Record<string, unknown>;
 

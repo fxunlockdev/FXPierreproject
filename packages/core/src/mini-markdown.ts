@@ -1,4 +1,4 @@
-import type { Entity, RichText } from './types.js';
+import type { Entity, RichText } from './types';
 
 /**
  * Tiny formatting language for headers/footers written in the dashboard:
@@ -7,7 +7,7 @@ import type { Entity, RichText } from './types.js';
  */
 export function parseMiniMarkdown(source: string): RichText {
   const tokenizer =
-    /\*\*(.+?)\*\*|__(.+?)__|`([^`\n]+?)`|\[([^\]\n]+?)\]\((https?:\/\/[^)\s]+?)\)/gs;
+    /\*\*([^*]+?)\*\*|__([^_]+?)__|`([^`\n]+?)`|\[([^\]\n]+?)\]\((https?:\/\/[^)\s]+?)\)/g;
 
   let text = '';
   const entities: Entity[] = [];

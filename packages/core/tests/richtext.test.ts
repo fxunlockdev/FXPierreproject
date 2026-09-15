@@ -6,7 +6,7 @@ import {
   spliceText,
   tidyWhitespace,
   truncateRichText,
-} from '../src/index.js';
+} from '../src/index';
 
 describe('spliceText', () => {
   const base = richText('Hello brave new world', [

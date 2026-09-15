@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { checkFilters, RouteFiltersSchema, richText, type RelayMessage } from '../src/index.js';
+import { checkFilters, RouteFiltersSchema, richText, type RelayMessage } from '../src/index';
 
 const msg = (text: string, media: RelayMessage['media'] = 'text'): RelayMessage => ({
   chatId: '-100123',

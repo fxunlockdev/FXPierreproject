@@ -5,9 +5,9 @@ import {
   type RelayMessage,
   type RichText,
 } from '@pierre/core';
-import type { Channel, ForwardRecord, RelayConfig, Route } from './model.js';
-import type { Store } from './store/store.js';
-import { TransportError, type ReaderHandlers, type Transport } from './transport/transport.js';
+import type { Channel, ForwardRecord, RelayConfig, Route } from './model';
+import type { Store } from './store/store';
+import { TransportError, type ReaderHandlers, type Transport } from './transport/transport';
 
 export interface ForwardPayload {
   srcText: RichText;

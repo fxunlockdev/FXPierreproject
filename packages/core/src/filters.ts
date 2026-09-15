@@ -1,5 +1,5 @@
-import type { RelayMessage } from './types.js';
-import type { RouteFilters } from './rules.js';
+import type { RelayMessage } from './types';
+import type { RouteFilters } from './rules';
 
 export type FilterResult = { pass: true } | { pass: false; reason: string };
 
