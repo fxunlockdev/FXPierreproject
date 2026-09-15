@@ -1,0 +1,352 @@
+import { randomUUID, timingSafeEqual } from 'node:crypto';
+import Fastify, { type FastifyInstance } from 'fastify';
+import { z } from 'zod';
+import { TelegramClient } from 'telegram';
+import { StringSession } from 'telegram/sessions/index.js';
+import { Bot } from 'grammy';
+import type { AlertDispatcher } from './alerts.js';
+import { encryptSecret } from './crypto.js';
+import type { Env } from './env.js';
+import type { RelayEngine } from './engine.js';
+import type { Store } from './store/store.js';
+import { BotApiTransport } from './transport/botapi.js';
+import { GramJsTransport } from './transport/gramjs.js';
+import type { SimTransport } from './transport/sim.js';
+import { TransportError, type Transport } from './transport/transport.js';
+
+export interface AdminOps {
+  insertAccount(fields: {
+    kind: 'user' | 'bot';
+    label: string;
+    phone?: string;
+    username?: string;
+    tgId?: string;
+    status: string;
+    isAlertSender?: boolean;
+  }): Promise<string>;
+  upsertChannelMeta(
+    channelId: string,
+    meta: { tgChatId: string; title: string; username?: string; isProtected: boolean },
+  ): Promise<void>;
+  upsertMembership(m: {
+    accountId: string;
+    channelId: string;
+    isMember: boolean;
+    isAdmin: boolean;
+    canPost: boolean;
+    canEdit: boolean;
+    canDelete: boolean;
+  }): Promise<void>;
+}
+
+export interface ServerDeps {
+  env: Env;
+  engine: RelayEngine;
+  store: Store;
+  admin: AdminOps | null;
+  dispatcher: AlertDispatcher;
+  sim: SimTransport | null;
+  registerTransport(t: Transport): Promise<void>;
+}
+
+interface PendingLogin {
+  id: string;
+  phone: string;
+  label: string;
+  phase: 'starting' | 'code' | 'password' | 'done' | 'error';
+  error?: string;
+  accountId?: string;
+  client: TelegramClient;
+  codeResolve?: (code: string) => void;
+  passwordResolve?: (pw: string) => void;
+}
+
+const safeEqual = (a: string, b: string): boolean => {
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  return bufA.length === bufB.length && timingSafeEqual(bufA, bufB);
+};
+
+export function buildServer(deps: ServerDeps): FastifyInstance {
+  const { env, engine, store, admin, dispatcher, sim } = deps;
+  const app = Fastify({ logger: false });
+  const logins = new Map<string, PendingLogin>();
+
+  app.addHook('onRequest', (req, reply, done) => {
+    if (req.url === '/health') return done();
+    const header = req.headers.authorization ?? '';
+    const token = header.startsWith('Bearer ') ? header.slice(7) : '';
+    if (!safeEqual(token, env.WORKER_API_TOKEN)) {
+      void reply.code(401).send({ error: 'unauthorized' });
+      return;
+    }
+    done();
+  });
+
+  app.get('/health', async () => ({
+    ok: true,
+    simulate: env.SIMULATE,
+    accounts: engine.config.accounts.length,
+  }));
+
+  // ── user-account login (phone → code → optional 2FA password) ─────────────
+
+  app.post('/login/start', async (req, reply) => {
+    const body = z.object({ phone: z.string().min(5), label: z.string().min(1).max(80) }).parse(req.body);
+    if (!env.TELEGRAM_API_ID || !env.TELEGRAM_API_HASH) {
+      return reply.code(400).send({ error: 'TELEGRAM_API_ID / TELEGRAM_API_HASH are not configured on the worker' });
+    }
+    if (!admin) return reply.code(400).send({ error: 'admin operations unavailable' });
+
+    const id = randomUUID();
+    const client = new TelegramClient(new StringSession(''), env.TELEGRAM_API_ID, env.TELEGRAM_API_HASH, {
+      connectionRetries: 3,
+    });
+    const pending: PendingLogin = { id, phone: body.phone, label: body.label, phase: 'starting', client };
+    logins.set(id, pending);
+
+    void client
+      .start({
+        phoneNumber: async () => body.phone,
+        phoneCode: () =>
+          new Promise<string>((resolve) => {
+            pending.phase = 'code';
+            pending.codeResolve = resolve;
+          }),
+        password: () =>
+          new Promise<string>((resolve) => {
+            pending.phase = 'password';
+            pending.passwordResolve = resolve;
+          }),
+        onError: async (err) => {
+          pending.phase = 'error';
+          pending.error = String(err.message ?? err);
+          return true; // stop retrying
+        },
+      })
+      .then(async () => {
+        const me = await client.getMe();
+        const session = (client.session as StringSession).save();
+        const accountId = await admin.insertAccount({
+          kind: 'user',
+          label: body.label,
+          phone: body.phone,
+          username: me.username ?? undefined,
+          tgId: me.id.toString(),
+          status: 'connected',
+        });
+        await store.setSecret(accountId, encryptSecret(session, env.SESSION_ENCRYPTION_KEY));
+        await client.disconnect();
+        await deps.registerTransport(
+          new GramJsTransport(accountId, env.TELEGRAM_API_ID!, env.TELEGRAM_API_HASH!, session),
+        );
+        await engine.reload();
+        pending.accountId = accountId;
+        pending.phase = 'done';
+      })
+      .catch((err: unknown) => {
+        pending.phase = 'error';
+        pending.error = err instanceof Error ? err.message : String(err);
+      });
+
+    return { loginId: id };
+  });
+
+  app.get('/login/:id', async (req, reply) => {
+    const { id } = z.object({ id: z.string() }).parse(req.params);
+    const pending = logins.get(id);
+    if (!pending) return reply.code(404).send({ error: 'unknown login' });
+    return { phase: pending.phase, error: pending.error, accountId: pending.accountId };
+  });
+
+  app.post('/login/:id/code', async (req, reply) => {
+    const { id } = z.object({ id: z.string() }).parse(req.params);
+    const { code } = z.object({ code: z.string().min(3).max(10) }).parse(req.body);
+    const pending = logins.get(id);
+    if (!pending?.codeResolve) return reply.code(409).send({ error: 'not waiting for a code' });
+    pending.phase = 'starting';
+    pending.codeResolve(code);
+    pending.codeResolve = undefined;
+    return { ok: true };
+  });
+
+  app.post('/login/:id/password', async (req, reply) => {
+    const { id } = z.object({ id: z.string() }).parse(req.params);
+    const { password } = z.object({ password: z.string().min(1) }).parse(req.body);
+    const pending = logins.get(id);
+    if (!pending?.passwordResolve) return reply.code(409).send({ error: 'not waiting for a password' });
+    pending.phase = 'starting';
+    pending.passwordResolve(password);
+    pending.passwordResolve = undefined;
+    return { ok: true };
+  });
+
+  // ── bot accounts ──────────────────────────────────────────────────────────
+
+  app.post('/accounts/bot', async (req, reply) => {
+    const body = z
+      .object({
+        token: z.string().regex(/^\d+:[\w-]{30,}$/, 'that does not look like a bot token'),
+        label: z.string().min(1).max(80),
+        isAlertSender: z.boolean().default(false),
+      })
+      .parse(req.body);
+    if (!admin) return reply.code(400).send({ error: 'admin operations unavailable' });
+
+    const probe = new Bot(body.token);
+    try {
+      await probe.init();
+    } catch {
+      return reply.code(400).send({ error: 'Telegram rejected this bot token' });
+    }
+
+    const accountId = await admin.insertAccount({
+      kind: 'bot',
+      label: body.label,
+      username: probe.botInfo.username,
+      tgId: String(probe.botInfo.id),
+      status: 'connected',
+      isAlertSender: body.isAlertSender,
+    });
+    await store.setSecret(accountId, encryptSecret(body.token, env.SESSION_ENCRYPTION_KEY));
+    await deps.registerTransport(new BotApiTransport(accountId, body.token));
+    await engine.reload();
+    return { accountId, username: probe.botInfo.username };
+  });
+
+  // ── channels ──────────────────────────────────────────────────────────────
+
+  const pickResolver = (preferAccountId?: string): Transport | undefined => {
+    if (preferAccountId) {
+      const t = engine.transport(preferAccountId);
+      if (t) return t;
+    }
+    const accounts = engine.config.accounts;
+    const user = accounts.find((a) => a.kind === 'user' && a.status === 'connected');
+    if (user) {
+      const t = engine.transport(user.id);
+      if (t) return t;
+    }
+    const bot = accounts.find((a) => a.kind === 'bot' && a.status === 'connected');
+    if (bot) {
+      const t = engine.transport(bot.id);
+      if (t) return t;
+    }
+    return sim ?? undefined;
+  };
+
+  app.post('/channels/resolve', async (req, reply) => {
+    const body = z
+      .object({ channelId: z.string().uuid(), ref: z.string().min(2), accountId: z.string().uuid().optional() })
+      .parse(req.body);
+    if (!admin) return reply.code(400).send({ error: 'admin operations unavailable' });
+
+    const resolver = pickResolver(body.accountId);
+    if (!resolver) return reply.code(409).send({ error: 'no connected Telegram account can resolve channels yet' });
+
+    try {
+      const meta = await resolver.resolveChannel(body.ref);
+      await admin.upsertChannelMeta(body.channelId, meta);
+      if (resolver.kind !== 'sim') {
+        await admin.upsertMembership({
+          accountId: resolver.accountId,
+          channelId: body.channelId,
+          isMember: true,
+          isAdmin: false,
+          canPost: false,
+          canEdit: false,
+          canDelete: false,
+        });
+      }
+      await engine.reload();
+      return meta;
+    } catch (err) {
+      const e = err instanceof TransportError ? err : new TransportError('unknown', String(err));
+      return reply.code(422).send({ error: e.message, code: e.code });
+    }
+  });
+
+  app.post('/channels/join', async (req, reply) => {
+    const body = z
+      .object({ channelId: z.string().uuid(), ref: z.string().min(2), accountId: z.string().uuid().optional() })
+      .parse(req.body);
+    if (!admin) return reply.code(400).send({ error: 'admin operations unavailable' });
+
+    const joiner = pickResolver(body.accountId);
+    if (!joiner) return reply.code(409).send({ error: 'no connected account available' });
+
+    try {
+      const meta = await joiner.joinChannel(body.ref);
+      await admin.upsertChannelMeta(body.channelId, meta);
+      if (joiner.kind !== 'sim') {
+        await admin.upsertMembership({
+          accountId: joiner.accountId,
+          channelId: body.channelId,
+          isMember: true,
+          isAdmin: false,
+          canPost: false,
+          canEdit: false,
+          canDelete: false,
+        });
+      }
+      await engine.reload();
+      return meta;
+    } catch (err) {
+      const e = err instanceof TransportError ? err : new TransportError('unknown', String(err));
+      return reply.code(422).send({ error: e.message, code: e.code });
+    }
+  });
+
+  // ── queue actions & alerts ────────────────────────────────────────────────
+
+  app.post('/forwards/retry', async (req) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(req.body);
+    await store.updateForward(id, { state: 'queued', deliverAt: new Date(), attempts: 0 });
+    return { ok: true };
+  });
+
+  app.post('/alerts/test', async () => {
+    await store.notify('test', 'Test alert', 'If you can read this, alert delivery works.');
+    await dispatcher.dispatch('test', 'Test alert', 'If you can read this, alert delivery works.');
+    return { ok: true };
+  });
+
+  // ── simulator hooks (only exist in SIMULATE mode; used by e2e tests) ──────
+
+  if (env.SIMULATE && sim) {
+    const firstMaster = () =>
+      engine.config.channels.find((c) => c.role === 'master' && c.enabled && c.tgChatId);
+
+    app.post('/sim/post', async (req, reply) => {
+      const body = z
+        .object({
+          text: z.string().max(4096),
+          chatTgId: z.string().optional(),
+          media: z.enum(['text', 'photo', 'video', 'document']).default('text'),
+        })
+        .parse(req.body);
+      const chatId = body.chatTgId ?? firstMaster()?.tgChatId;
+      if (!chatId) return reply.code(409).send({ error: 'no enabled master channel to post into' });
+      const msg = await sim.injectPost(chatId, body.text, { media: body.media });
+      return { messageId: msg.messageId, chatTgId: chatId };
+    });
+
+    app.post('/sim/edit', async (req) => {
+      const body = z
+        .object({ chatTgId: z.string(), messageId: z.number().int(), text: z.string().max(4096) })
+        .parse(req.body);
+      await sim.injectEdit(body.chatTgId, body.messageId, body.text);
+      return { ok: true };
+    });
+
+    app.post('/sim/delete', async (req) => {
+      const body = z
+        .object({ chatTgId: z.string(), messageIds: z.array(z.number().int()).min(1) })
+        .parse(req.body);
+      await sim.injectDelete(body.chatTgId, body.messageIds);
+      return { ok: true };
+    });
+  }
+
+  return app;
+}
