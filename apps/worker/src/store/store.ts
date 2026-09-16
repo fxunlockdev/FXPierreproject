@@ -7,6 +7,7 @@ import type {
   NewForward,
   RelayConfig,
 } from '../model';
+import type { DiscoveredChat } from '../transport/transport';
 
 export interface IncidentRefs {
   channelId?: string;
@@ -62,6 +63,11 @@ export interface Store {
   ): Promise<{ id: string; isNew: boolean }>;
   resolveIncidents(kind: IncidentKind, refs: IncidentRefs): Promise<void>;
   notify(kind: string, title: string, body: string, incidentId?: string): Promise<void>;
+
+  /** Record a chat an account can see (pick-from-list in the dashboard). */
+  upsertDiscoveredChat(accountId: string, chat: DiscoveredChat): Promise<void>;
+  /** A basic group became a supergroup: repoint channels + discovery at the new id. */
+  migrateChatId(oldChatId: string, newChatId: string): Promise<void>;
 
   setChannelHealth(channelId: string, health: ChannelHealth, error?: string): Promise<void>;
   setChannelLastMessage(channelId: string, at: Date): Promise<void>;

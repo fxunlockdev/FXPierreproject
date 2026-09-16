@@ -26,7 +26,7 @@ test.describe.serial("relay flow", () => {
 
     // master
     await page.getByRole("button", { name: "Add channel" }).click();
-    await page.getByLabel("Channel", { exact: true }).fill("@gold_signals");
+    await page.getByLabel("Username or link", { exact: true }).fill("@gold_signals");
     await page.getByRole("button", { name: "Add channel" }).last().click();
     await expect(page.getByText(`Added "${MASTER_NAME}"`)).toBeVisible();
     await expect(page.getByText(MASTER_NAME).first()).toBeVisible();
@@ -34,7 +34,7 @@ test.describe.serial("relay flow", () => {
     // receiver
     await page.getByRole("button", { name: "Add channel" }).click();
     await pickOption(page, page.getByRole("combobox").first(), /Receiver/);
-    await page.getByLabel("Channel", { exact: true }).fill("@vip_room");
+    await page.getByLabel("Username or link", { exact: true }).fill("@vip_room");
     await page.getByRole("button", { name: "Add channel" }).last().click();
     await expect(page.getByText(`Added "${RECEIVER_NAME}"`)).toBeVisible();
   });
@@ -43,7 +43,7 @@ test.describe.serial("relay flow", () => {
     await signIn(page);
     await page.goto("/channels");
     await page.getByRole("button", { name: "Add channel" }).click();
-    await page.getByLabel("Channel", { exact: true }).fill("@protected_source");
+    await page.getByLabel("Username or link", { exact: true }).fill("@protected_source");
     await page.getByRole("button", { name: "Add channel" }).last().click();
     await expect(page.getByText(/protected content and cannot be relayed/i)).toBeVisible();
     await expect(page.getByText(/Restrict saving content/i)).toBeVisible();

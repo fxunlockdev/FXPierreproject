@@ -10,6 +10,7 @@ import type {
   AppSettingsRow,
   AuditRow,
   ChannelRow,
+  DiscoveredChatRow,
   ForwardRow,
   IncidentRow,
   MemberRow,
@@ -33,6 +34,12 @@ export const useChannels = () =>
 
 export const useRoutes = () =>
   useQuery({ queryKey: ["routes"], queryFn: () => selectAll<RouteRow>("routes", "created_at", true) });
+
+export const useDiscoveredChats = () =>
+  useQuery({
+    queryKey: ["discovered_chats"],
+    queryFn: () => selectAll<DiscoveredChatRow>("discovered_chats", "last_seen_at", false, 500),
+  });
 
 export const useAccounts = () =>
   useQuery({ queryKey: ["accounts"], queryFn: () => selectAll<AccountRow>("telegram_accounts", "created_at", true) });

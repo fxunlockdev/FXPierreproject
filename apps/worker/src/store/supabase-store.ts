@@ -9,6 +9,7 @@ import type {
   NewForward,
   RelayConfig,
 } from '../model';
+import type { DiscoveredChat, ResolvedChannel } from '../transport/transport';
 import type { IncidentRefs, Store } from './store';
 
 type Row = Record<string, unknown>;
@@ -317,6 +318,29 @@ export class SupabaseStore implements Store {
     }
   }
 
+  async upsertDiscoveredChat(accountId: string, chat: DiscoveredChat): Promise<void> {
+    const { error } = await this.sb.from('discovered_chats').upsert(
+      {
+        account_id: accountId,
+        tg_chat_id: chat.tgChatId,
+        chat_type: chat.chatType,
+        title: chat.title,
+        username: chat.username ?? null,
+        status: chat.status,
+        can_read: chat.canRead,
+        can_post: chat.canPost,
+        last_seen_at: new Date().toISOString(),
+      },
+      { onConflict: 'account_id,tg_chat_id' },
+    );
+    this.fail('upsertDiscoveredChat', error);
+  }
+
+  async migrateChatId(oldChatId: string, newChatId: string): Promise<void> {
+    const { error } = await this.sb.rpc('migrate_chat_id', { p_old: oldChatId, p_new: newChatId });
+    this.fail('migrateChatId', error);
+  }
+
   async setChannelHealth(channelId: string, health: ChannelHealth, error?: string): Promise<void> {
     if (this.lastHealth.get(channelId) === health) return;
     this.lastHealth.set(channelId, health);
@@ -419,7 +443,7 @@ export class SupabaseStore implements Store {
   /** Channel + membership upserts used by resolve/join admin endpoints. */
   async upsertChannelMeta(
     channelId: string,
-    meta: { tgChatId: string; title: string; username?: string; isProtected: boolean },
+    meta: ResolvedChannel,
   ): Promise<void> {
     const { error } = await this.sb
       .from('channels')
@@ -427,6 +451,7 @@ export class SupabaseStore implements Store {
         tg_chat_id: meta.tgChatId,
         title: meta.title,
         username: meta.username ?? null,
+        chat_type: meta.chatType ?? null,
         is_protected: meta.isProtected,
         health: meta.isProtected ? 'protected' : 'ok',
       })

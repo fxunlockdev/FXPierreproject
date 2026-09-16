@@ -44,18 +44,37 @@ export interface SendOptions {
   applyCaption?: boolean;
 }
 
+export type ChatType = 'channel' | 'supergroup' | 'group';
+
 export interface ResolvedChannel {
   tgChatId: string;
   title: string;
   username?: string;
   isProtected: boolean;
   memberCount?: number;
+  chatType?: ChatType;
+}
+
+/** A chat an account is (or was) in — powers pick-from-list in the dashboard. */
+export interface DiscoveredChat {
+  tgChatId: string;
+  chatType: ChatType;
+  title: string;
+  username?: string;
+  status: 'administrator' | 'member' | 'restricted' | 'left' | 'kicked';
+  /** Receives every new message there (admin, or group privacy mode off). */
+  canRead: boolean;
+  canPost: boolean;
 }
 
 export interface ReaderHandlers {
   onPost(accountId: string, msg: RelayMessage): void | Promise<void>;
   onEdit(accountId: string, msg: RelayMessage): void | Promise<void>;
   onDelete(accountId: string, chatId: string, messageIds: number[]): void | Promise<void>;
+  /** Membership changed, or a message revealed a chat — record it. */
+  onChatSeen?(accountId: string, chat: DiscoveredChat, membershipChanged: boolean): void | Promise<void>;
+  /** A basic group became a supergroup and got a new id. */
+  onChatMigrated?(oldChatId: string, newChatId: string): void | Promise<void>;
 }
 
 /**

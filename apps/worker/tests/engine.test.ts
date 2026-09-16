@@ -3,7 +3,7 @@ import { parseRouteRules, parseRouteSchedule } from '@pierre/core';
 import { RelayEngine } from '../src/engine';
 import { MemoryStore } from '../src/store/memory-store';
 import { SimTransport } from '../src/transport/sim';
-import { TransportError, type SendOptions } from '../src/transport/transport';
+import { TransportError, type SendOptions, type Transport } from '../src/transport/transport';
 import type { RelayConfig, Route } from '../src/model';
 
 const MASTER_TG = '-100111';
@@ -508,5 +508,138 @@ describe('RelayEngine — edits and deletes against a not-yet-sent post', () => 
     const row = [...store.forwards.values()].find((f) => f.srcMessageId === 71)!;
     expect(row.state).toBe('dropped');
     expect(row.dropReason).toContain('deleted at the source');
+  });
+});
+
+describe('RelayEngine — immediate delivery (hot path)', () => {
+  const immediateEngine = async (patch?: (cfg: RelayConfig) => void, transport?: Transport) => {
+    patch?.(store.config);
+    engine = new RelayEngine(store, { albumWaitMs: 15, clock, immediateDelivery: true });
+    const t = transport ?? sim;
+    engine.registerTransport(t);
+    await engine.init();
+    await t.start(engine.handlers);
+  };
+
+  it('delivers a post during ingest — no sender-loop tick needed', async () => {
+    await immediateEngine();
+    await sim.injectPost(MASTER_TG, 'instant');
+
+    expect(sim.sent).toHaveLength(1); // no engine.tick() was called
+    const row = [...store.forwards.values()][0]!;
+    expect(row.state).toBe('done');
+  });
+
+  it('keeps posts from one master in order, even when they arrive together', async () => {
+    await immediateEngine();
+    await Promise.all(
+      ['1 BUY', '2 SL moved', '3 TP hit'].map((text, i) =>
+        sim.injectPost(MASTER_TG, text, { messageId: 500 + i }),
+      ),
+    );
+
+    expect(sim.sent.map((s) => s.text.text)).toEqual(['1 BUY', '2 SL moved', '3 TP hit']);
+  });
+
+  it('fans one post out to every receiver in parallel', async () => {
+    await immediateEngine((cfg) => cfg.routes.push(baseRoute({ id: 'rt2', receiverId: 'r2' })));
+    await sim.injectPost(MASTER_TG, 'fan out');
+    expect(sim.sent.map((s) => s.toChatId).sort()).toEqual([RECEIVER1_TG, RECEIVER2_TG]);
+  });
+
+  it('an edit arriving right behind its post still finds it', async () => {
+    await immediateEngine();
+    const posted = sim.injectPost(MASTER_TG, 'entry 1.0850', { messageId: 610 });
+    const edited = sim.injectEdit(MASTER_TG, 610, 'entry 1.0900');
+    await Promise.all([posted, edited]);
+
+    expect(sim.sent).toHaveLength(1);
+    expect(sim.edits.map((e) => e.text.text)).toEqual(['entry 1.0900']);
+  });
+
+  it('never relays its own delivery back out (A → B → A loops)', async () => {
+    await immediateEngine((cfg) => {
+      // the receiver chat is ALSO a master, routed onward to a second receiver
+      cfg.channels.push({
+        id: 'm2', role: 'master', tgChatId: RECEIVER1_TG, title: 'VIP as master',
+        enabled: true, health: 'ok', isProtected: false,
+      });
+      cfg.memberships.push({
+        accountId: 'acc-sim', channelId: 'm2', isMember: true, isAdmin: true,
+        canPost: true, canEdit: true, canDelete: true,
+      });
+      cfg.routes.push(baseRoute({ id: 'rt-loop', masterId: 'm2', receiverId: 'r2' }));
+    });
+
+    await sim.injectPost(MASTER_TG, 'original');
+    const ourCopy = sim.sent[0]!;
+    // the reader now sees our copy appear in the receiver chat
+    await sim.injectPost(RECEIVER1_TG, 'original', { messageId: ourCopy.destMessageIds[0] });
+    expect(sim.sent).toHaveLength(1);
+
+    // a genuinely new post in that chat still relays
+    await sim.injectPost(RECEIVER1_TG, 'written by a human', { messageId: 99_999 });
+    expect(sim.sent.map((s) => s.toChatId)).toEqual([RECEIVER1_TG, RECEIVER2_TG]);
+  });
+
+  it('bursts are allowed; only a full window is held back, then drains in order', async () => {
+    // pacing applies to real accounts — present the simulator as a bot
+    const botLike = new Proxy(sim, {
+      get: (target, prop, receiver) => (prop === 'kind' ? 'bot' : Reflect.get(target, prop, receiver)),
+    }) as unknown as Transport;
+    await immediateEngine((cfg) => {
+      cfg.accounts[0]!.kind = 'bot';
+      cfg.accounts[0]!.maxMsgsPerMinute = 3; // receiver window: 3 per minute
+    }, botLike);
+
+    for (let i = 0; i < 5; i += 1) {
+      await sim.injectPost(MASTER_TG, `burst ${i}`, { messageId: 700 + i });
+    }
+    expect(sim.sent.map((s) => s.text.text)).toEqual(['burst 0', 'burst 1', 'burst 2']);
+    const held = [...store.forwards.values()].filter((f) => f.state === 'queued');
+    expect(held).toHaveLength(2);
+
+    nowMs += 61_000;
+    await drain();
+    expect(sim.sent.map((s) => s.text.text)).toEqual(['burst 0', 'burst 1', 'burst 2', 'burst 3', 'burst 4']);
+  });
+
+  it('holds an album open while items keep arriving, then sends it once', async () => {
+    engine = new RelayEngine(store, { albumWaitMs: 60, clock, immediateDelivery: true });
+    engine.registerTransport(sim);
+    await engine.init();
+    await sim.start(engine.handlers);
+
+    for (const id of [801, 802, 803]) {
+      await sim.injectPost(MASTER_TG, id === 801 ? 'caption' : '', {
+        media: 'photo', albumKey: 'alb-slow', messageId: id,
+      });
+      await sleep(25); // each gap is shorter than the quiet window
+    }
+    await sleep(150);
+
+    expect(sim.sent).toHaveLength(1);
+    expect(sim.sent[0]!.srcMessageIds).toEqual([801, 802, 803]);
+  });
+});
+
+describe('RelayEngine — chat discovery', () => {
+  it('records chats reported by a reader', async () => {
+    await engine.handlers.onChatSeen?.(
+      'acc-sim',
+      {
+        tgChatId: '-1009876543210', chatType: 'supergroup', title: 'Private group',
+        status: 'administrator', canRead: true, canPost: true,
+      },
+      true,
+    );
+    expect(store.discovered.get('acc-sim:-1009876543210')?.title).toBe('Private group');
+  });
+
+  it('follows a basic group upgrading to a supergroup', async () => {
+    await engine.handlers.onChatMigrated?.(MASTER_TG, '-1005550001111');
+    await sim.injectPost('-1005550001111', 'after upgrade');
+    await drain();
+    expect(sim.sent).toHaveLength(1);
   });
 });

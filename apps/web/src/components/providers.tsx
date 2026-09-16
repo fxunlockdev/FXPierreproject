@@ -31,6 +31,7 @@ function RealtimeBridge() {
       channels: "channels",
       routes: "routes",
       telegram_accounts: "accounts",
+      discovered_chats: "discovered_chats",
     };
 
     let channel = sb.channel("dashboard-live");

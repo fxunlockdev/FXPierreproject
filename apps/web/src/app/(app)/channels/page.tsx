@@ -21,8 +21,9 @@ import {
   useUpdateChannel,
 } from "@/lib/queries";
 import { supabaseBrowser } from "@/lib/supabase/client";
-import type { ChannelRow } from "@/lib/types";
+import type { ChannelRow, DiscoveredChatRow } from "@/lib/types";
 import { workerCall } from "@/lib/worker";
+import { DiscoveredPicker } from "./discovered-picker";
 
 const HEALTH_LABEL: Record<string, string> = {
   ok: "healthy",
@@ -37,8 +38,37 @@ function AddChannelDialog() {
   const [role, setRole] = useState<"master" | "receiver">("master");
   const [ref, setRef] = useState("");
   const [busy, setBusy] = useState(false);
+  const [picking, setPicking] = useState<string | null>(null);
   const insert = useInsertChannel();
   const qc = useQueryClient();
+
+  /** Save the row, then have the worker verify it with Telegram right away. */
+  const addChannel = async (row: Partial<ChannelRow>, ref: string, label: string) => {
+    const { data, error } = await supabaseBrowser()
+      .from("channels")
+      .insert({ role, ...row })
+      .select("id")
+      .single();
+    if (error) throw new Error(error.message);
+
+    try {
+      const meta = await workerCall<{ title: string; isProtected: boolean }>("channels/resolve", {
+        channelId: data.id,
+        ref,
+      });
+      toast.success(
+        meta.isProtected
+          ? `Added "${meta.title}" — but it has protected content and cannot be relayed`
+          : `Added "${meta.title}"`,
+      );
+    } catch (err) {
+      toast.info(
+        `Saved "${label}". ${err instanceof Error ? err.message : "Verification will happen once the relay connects."}`,
+      );
+    }
+    // the resolve call just rewrote the row server-side — don't wait for realtime
+    void qc.invalidateQueries({ queryKey: ["channels"] });
+  };
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -48,36 +78,11 @@ function AddChannelDialog() {
       const username = /^@?[A-Za-z]\w{3,31}$/.test(cleanRef.replace(/^@/, ""))
         ? cleanRef.replace(/^@/, "")
         : null;
-      const { data, error } = await supabaseBrowser()
-        .from("channels")
-        .insert({
-          role,
-          title: cleanRef.replace(/^@/, ""),
-          username,
-          invite_link: username ? null : cleanRef,
-        })
-        .select("id")
-        .single();
-      if (error) throw new Error(error.message);
-
-      // Best effort: ask the worker to resolve real metadata right away.
-      try {
-        const meta = await workerCall<{ title: string; isProtected: boolean }>("channels/resolve", {
-          channelId: data.id,
-          ref: cleanRef,
-        });
-        toast.success(
-          meta.isProtected
-            ? `Added "${meta.title}" — but it has protected content and cannot be relayed`
-            : `Added "${meta.title}"`,
-        );
-      } catch (err) {
-        toast.info(
-          `Channel saved. ${err instanceof Error ? err.message : "Verification will happen once the relay connects."}`,
-        );
-      }
-      // the resolve call just rewrote the row server-side — don't wait for realtime
-      void qc.invalidateQueries({ queryKey: ["channels"] });
+      await addChannel(
+        { title: cleanRef.replace(/^@/, ""), username, invite_link: username ? null : cleanRef },
+        cleanRef,
+        cleanRef,
+      );
       setRef("");
       setOpen(false);
       insert.reset();
@@ -85,6 +90,23 @@ function AddChannelDialog() {
       toast.error(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
+    }
+  };
+
+  // Picking keeps the dialog open: the chat drops off the list, add the next one.
+  const pick = async (chat: DiscoveredChatRow) => {
+    const chatId = String(chat.tg_chat_id);
+    setPicking(chatId);
+    try {
+      await addChannel(
+        { tg_chat_id: chatId, title: chat.title, username: chat.username, chat_type: chat.chat_type },
+        chatId,
+        chat.title,
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPicking(null);
     }
   };
 
@@ -96,10 +118,11 @@ function AddChannelDialog() {
         </Button>
       </DialogTrigger>
       <DialogContent
-        title="Add a channel"
-        description="Paste a public @username or a t.me invite link."
+        wide
+        title="Add a channel or group"
+        description="Pick a chat the bot is already in — private channels and groups included."
       >
-        <form onSubmit={submit} className="flex flex-col gap-4">
+        <div className="flex flex-col gap-5">
           <Field label="Role">
             <Select
               value={role}
@@ -110,30 +133,34 @@ function AddChannelDialog() {
               ]}
             />
           </Field>
-          <Field
-            label="Channel"
-            hint={
-              role === "master"
-                ? "The reader account must be a member of this channel."
-                : "The sender account or bot must be an admin with Post rights here."
-            }
-          >
-            <Input
-              required
-              value={ref}
-              onChange={(e) => setRef(e.target.value)}
-              placeholder="@channel or https://t.me/+AbCdEf…"
-            />
-          </Field>
-          <div className="flex justify-end gap-2 pt-1">
-            <Button type="button" variant="ghost" onClick={() => setOpen(false)}>
-              Cancel
-            </Button>
-            <Button type="submit" variant="primary" loading={busy}>
-              Add channel
-            </Button>
-          </div>
-        </form>
+
+          <section aria-label="Chats the bot can see">
+            <p className="mb-2 text-[13px] font-medium text-mute">Chats the bot can see</p>
+            <DiscoveredPicker role={role} busyChatId={picking} onPick={pick} />
+          </section>
+
+          <form onSubmit={submit} className="flex flex-col gap-4 border-t border-edge pt-5">
+            <Field
+              label="Username or link"
+              hint="Public @username, t.me link, or a post link from a private chat (… → Copy post link). Invite links (t.me/+…) can’t be used by bots — pick from the list above instead."
+            >
+              <Input
+                required
+                value={ref}
+                onChange={(e) => setRef(e.target.value)}
+                placeholder="@channel · t.me/name · t.me/c/1234567890/5"
+              />
+            </Field>
+            <div className="flex justify-end gap-2">
+              <Button type="button" variant="ghost" onClick={() => setOpen(false)}>
+                Done
+              </Button>
+              <Button type="submit" variant="primary" loading={busy}>
+                Add channel
+              </Button>
+            </div>
+          </form>
+        </div>
       </DialogContent>
     </Dialog>
   );
@@ -157,7 +184,12 @@ function ChannelRowItem({ channel, routeCount }: { channel: ChannelRow; routeCou
           )}
         </div>
         <p className="truncate font-mono text-[11.5px] text-faint">
-          {channel.username ? `@${channel.username}` : channel.invite_link ?? "unresolved"}
+          {channel.chat_type && `${channel.chat_type === "channel" ? "channel" : "group"} · `}
+          {channel.username
+            ? `@${channel.username}`
+            : channel.tg_chat_id != null
+              ? "private"
+              : (channel.invite_link ?? "unresolved")}
           {" · "}
           {HEALTH_LABEL[channel.health] ?? channel.health}
           {channel.role === "master" && ` · last post ${timeAgo(channel.last_message_at)}`}
@@ -190,7 +222,12 @@ function ChannelRowItem({ channel, routeCount }: { channel: ChannelRow; routeCou
                 try {
                   const meta = await workerCall<{ title: string }>("channels/resolve", {
                     channelId: channel.id,
-                    ref: channel.username ? `@${channel.username}` : (channel.invite_link ?? ""),
+                    // a known chat id always resolves; invite links never do for bots
+                    ref: channel.username
+                      ? `@${channel.username}`
+                      : channel.tg_chat_id != null
+                        ? String(channel.tg_chat_id)
+                        : (channel.invite_link ?? ""),
                   });
                   toast.success(`Verified "${meta.title}"`);
                 } catch (err) {
@@ -262,7 +299,7 @@ export default function ChannelsPage() {
         <div>
           <h1 className="text-xl font-semibold tracking-tight">Channels</h1>
           <p className="mt-0.5 text-[13px] text-mute">
-            Masters are watched; receivers get the posts. Toggle any channel off without restarts.
+            Channels and groups. Masters are watched; receivers get the posts. Toggle any of them off without restarts.
           </p>
         </div>
         <AddChannelDialog />

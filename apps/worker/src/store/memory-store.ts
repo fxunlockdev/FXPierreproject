@@ -8,6 +8,7 @@ import type {
   NewForward,
   RelayConfig,
 } from '../model';
+import type { DiscoveredChat } from '../transport/transport';
 import type { IncidentRefs, Store } from './store';
 
 interface MemoryIncident {
@@ -64,6 +65,8 @@ export class MemoryStore implements Store {
     }
     const id = randomUUID();
     this.forwards.set(id, { ...f, id, attempts: f.attempts ?? 0, createdAt: new Date() });
+    // written straight as sending by immediate delivery — reapable like a claim
+    if (f.state === 'sending') this.sendingSince.set(id, f.deliverAt.getTime());
     return { id, deduped: false };
   }
 
@@ -170,6 +173,18 @@ export class MemoryStore implements Store {
   }
 
   async setChannelLastMessage(): Promise<void> {}
+
+  discovered = new Map<string, DiscoveredChat & { accountId: string }>();
+
+  async upsertDiscoveredChat(accountId: string, chat: DiscoveredChat): Promise<void> {
+    this.discovered.set(`${accountId}:${chat.tgChatId}`, { ...chat, accountId });
+  }
+
+  async migrateChatId(oldChatId: string, newChatId: string): Promise<void> {
+    for (const ch of this.config.channels) {
+      if (ch.tgChatId === oldChatId) ch.tgChatId = newChatId;
+    }
+  }
 
   async setAccountStatus(accountId: string, status: string): Promise<void> {
     const acc = this.config.accounts.find((a) => a.id === accountId);

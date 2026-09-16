@@ -5,7 +5,7 @@ import {
   type RelayMessage,
   type RichText,
 } from '@pierre/core';
-import type { Channel, ForwardRecord, RelayConfig, Route } from './model';
+import type { Channel, ForwardRecord, NewForward, RelayConfig, Route } from './model';
 import type { Store } from './store/store';
 import { TransportError, type ReaderHandlers, type Transport } from './transport/transport';
 
@@ -16,7 +16,10 @@ export interface ForwardPayload {
 }
 
 export interface EngineOptions {
+  /** Quiet period that closes an album; every new item restarts it. */
   albumWaitMs?: number;
+  /** Hard cap on how long an album is held open. */
+  albumMaxWaitMs?: number;
   maxAttempts?: number;
   /** Backoff between retries, seconds per attempt index */
   backoffSeconds?: number[];
@@ -24,17 +27,28 @@ export interface EngineOptions {
   autopauseAfter?: number;
   /** Rows stuck in `sending` longer than this are parked as failed (never requeued). */
   staleSendingSeconds?: number;
+  /**
+   * Send due-now forwards straight from ingest, instead of persisting them as
+   * queued and waiting for the sender loop's next claim — the difference
+   * between ~1 and ~3 database round trips (plus a tick) on the hot path.
+   */
+  immediateDelivery?: boolean;
   clock?: () => Date;
 }
 
 const DEFAULTS: Required<EngineOptions> = {
-  albumWaitMs: 1500,
+  albumWaitMs: 500,
+  albumMaxWaitMs: 2000,
   maxAttempts: 5,
   backoffSeconds: [1, 5, 30, 120, 600],
   autopauseAfter: 3,
   staleSendingSeconds: 180,
+  immediateDelivery: false,
   clock: () => new Date(),
 };
+
+/** Telegram's global bot limit is ~30 msgs/s; stay just under it. */
+const BOT_MSGS_PER_SECOND = 25;
 
 /**
  * The relay brain: ingests posts from readers, runs the rules pipeline,
@@ -49,11 +63,20 @@ export class RelayEngine {
   private routesById = new Map<string, Route>();
 
   private transports = new Map<string, Transport>();
-  private albumBuffer = new Map<string, { msgs: RelayMessage[]; timer: NodeJS.Timeout }>();
+  private albumBuffer = new Map<
+    string,
+    { msgs: RelayMessage[]; timer: NodeJS.Timeout; firstAt: number }
+  >();
   private seen = new Set<string>();
   private seenOrder: string[] = [];
-  private nextSlotByReceiver = new Map<string, number>();
-  private nextSlotByAccount = new Map<string, number>();
+  /** Recent send timestamps per rate-limit key (sliding windows). */
+  private sendWindows = new Map<string, number[]>();
+  /** Per-master processing chain: posts, edits and deletes keep arrival order. */
+  private masterChains = new Map<string, Promise<void>>();
+  /** chat:message ids we delivered — so A → B → A setups can't loop. */
+  private sentByUs = new Set<string>();
+  private sentByUsOrder: string[] = [];
+  private lastMasterTouch = new Map<string, number>();
   private consecutiveFails = new Map<string, number>();
   private bufferCopies = new Map<string, number[]>();
   private unsubscribe: (() => void) | null = null;
@@ -61,8 +84,21 @@ export class RelayEngine {
 
   readonly handlers: ReaderHandlers = {
     onPost: (_accountId, msg) => this.ingest(msg),
-    onEdit: (_accountId, msg) => this.handleEdit(msg),
-    onDelete: (_accountId, chatId, ids) => this.handleDelete(chatId, ids),
+    onEdit: (_accountId, msg) => this.inOrder(msg.chatId, () => this.handleEdit(msg)),
+    onDelete: (_accountId, chatId, ids) => this.inOrder(chatId, () => this.handleDelete(chatId, ids)),
+    onChatSeen: (accountId, chat) =>
+      this.store
+        .upsertDiscoveredChat(accountId, chat)
+        .catch((err) => console.error('[engine] could not record discovered chat:', err)),
+    onChatMigrated: async (oldChatId, newChatId) => {
+      try {
+        await this.store.migrateChatId(oldChatId, newChatId);
+        await this.reload();
+        console.log(`[engine] group ${oldChatId} upgraded to supergroup ${newChatId}`);
+      } catch (err) {
+        console.error('[engine] could not follow group upgrade:', err);
+      }
+    },
   };
 
   constructor(
@@ -119,25 +155,64 @@ export class RelayEngine {
     const key = `${msg.chatId}:${msg.messageId}`;
     if (this.seen.has(key)) return;
     this.remember(key);
+    // our own delivery surfacing in a chat that is also a master (A → B → A)
+    if (this.sentByUs.has(key)) return;
 
     if (msg.albumKey) {
       const bufKey = `${msg.chatId}:${msg.albumKey}`;
+      const flush = (): void => {
+        const group = this.albumBuffer.get(bufKey);
+        this.albumBuffer.delete(bufKey);
+        if (group) {
+          const ordered = group.msgs.sort((a, b) => a.messageId - b.messageId);
+          void this.inOrder(msg.chatId, () => this.processGroup(ordered));
+        }
+      };
       const existing = this.albumBuffer.get(bufKey);
       if (existing) {
         existing.msgs.push(msg);
+        clearTimeout(existing.timer);
+        const capLeft = this.opts.albumMaxWaitMs - (Date.now() - existing.firstAt);
+        existing.timer = setTimeout(flush, Math.max(0, Math.min(this.opts.albumWaitMs, capLeft)));
+        existing.timer.unref?.();
         return;
       }
-      const timer = setTimeout(() => {
-        const group = this.albumBuffer.get(bufKey);
-        this.albumBuffer.delete(bufKey);
-        if (group) void this.processGroup(group.msgs.sort((a, b) => a.messageId - b.messageId));
-      }, this.opts.albumWaitMs);
+      const timer = setTimeout(flush, this.opts.albumWaitMs);
       timer.unref?.();
-      this.albumBuffer.set(bufKey, { msgs: [msg], timer });
+      this.albumBuffer.set(bufKey, { msgs: [msg], timer, firstAt: Date.now() });
       return;
     }
 
-    await this.processGroup([msg]);
+    await this.inOrder(msg.chatId, () => this.processGroup([msg]));
+  }
+
+  /**
+   * Run `work` after everything already queued for this master. With
+   * immediate delivery, unordered processing could let "SL moved" overtake
+   * "BUY" on its way to a receiver, or an edit arrive before its post exists.
+   */
+  private inOrder(masterChatId: string, work: () => Promise<void>): Promise<void> {
+    const previous = this.masterChains.get(masterChatId) ?? Promise.resolve();
+    const next = previous.then(work).catch((err) => {
+      console.error(`[engine] processing an update from ${masterChatId} failed:`, err);
+    });
+    this.masterChains.set(masterChatId, next);
+    void next.then(() => {
+      if (this.masterChains.get(masterChatId) === next) this.masterChains.delete(masterChatId);
+    });
+    return next;
+  }
+
+  private rememberSent(chatId: string, messageIds: number[]): void {
+    for (const id of messageIds) {
+      const key = `${chatId}:${id}`;
+      this.sentByUs.add(key);
+      this.sentByUsOrder.push(key);
+    }
+    while (this.sentByUsOrder.length > 10_000) {
+      const oldest = this.sentByUsOrder.shift();
+      if (oldest) this.sentByUs.delete(oldest);
+    }
   }
 
   private remember(key: string): void {
@@ -168,67 +243,116 @@ export class RelayEngine {
     const master = this.mastersByTgId.get(first.chatId);
     if (!master || !master.enabled) return;
 
-    await this.store.setChannelLastMessage(master.id, this.opts.clock());
-    await this.store.resolveIncidents('master_silent', { channelId: master.id });
+    this.touchMaster(master.id);
 
     // The album's caption lives on whichever item has text.
     const primary = msgs.find((m) => m.text.text.length > 0) ?? first;
     const now = this.opts.clock();
 
-    for (const route of this.routesByMaster.get(master.id) ?? []) {
-      if (!route.enabled) continue;
-      const receiver = this.channelsById.get(route.receiverId);
-      if (!receiver || !receiver.enabled || !receiver.tgChatId) continue;
+    // Receivers are independent: fan out in parallel, so the 10th receiver
+    // doesn't wait for nine sequential database writes and sends.
+    await Promise.all(
+      (this.routesByMaster.get(master.id) ?? []).map((route) =>
+        this.processRoute(route, master, msgs, primary, now).catch((err) => {
+          console.error(`[engine] route ${route.id} failed to process a post:`, err);
+        }),
+      ),
+    );
+  }
 
-      const base = {
-        routeId: route.id,
-        masterChannelId: master.id,
-        receiverChannelId: receiver.id,
-        srcMessageId: first.messageId,
-        srcMessageIds: msgs.map((m) => m.messageId),
-        albumKey: first.albumKey,
-        kind: 'post' as const,
-        mediaKind: primary.media,
-      };
+  private async processRoute(
+    route: Route,
+    master: Channel,
+    msgs: RelayMessage[],
+    primary: RelayMessage,
+    now: Date,
+  ): Promise<void> {
+    if (!route.enabled) return;
+    const receiver = this.channelsById.get(route.receiverId);
+    if (!receiver || !receiver.enabled || !receiver.tgChatId) return;
 
-      const result = applyRules(primary, route.rules, this.contextFor(master, primary, route));
-      if (result.action === 'drop') {
-        await this.store.upsertForward({
-          ...base,
-          state: 'dropped',
-          dropReason: result.reason,
-          deliverAt: now,
-          preview: primary.text.text.slice(0, 200),
-        });
-        continue;
-      }
+    const first = msgs[0]!;
+    const base = {
+      routeId: route.id,
+      masterChannelId: master.id,
+      receiverChannelId: receiver.id,
+      srcMessageId: first.messageId,
+      srcMessageIds: msgs.map((m) => m.messageId),
+      albumKey: first.albumKey,
+      kind: 'post' as const,
+      mediaKind: primary.media,
+    };
 
-      const timing = resolveTiming(now, route.delaySeconds, route.schedule, route.pausedUntil);
-      if (timing.action === 'drop') {
-        await this.store.upsertForward({
-          ...base,
-          state: 'dropped',
-          dropReason: timing.reason,
-          deliverAt: now,
-          preview: result.output.text.slice(0, 200),
-        });
-        continue;
-      }
-
-      const payload: ForwardPayload = {
-        srcText: primary.text,
-        output: result.output,
-        removeButtons: result.removeButtons,
-      };
-
+    const result = applyRules(primary, route.rules, this.contextFor(master, primary, route));
+    if (result.action === 'drop') {
       await this.store.upsertForward({
+        ...base,
+        state: 'dropped',
+        dropReason: result.reason,
+        deliverAt: now,
+        preview: primary.text.text.slice(0, 200),
+      });
+      return;
+    }
+
+    const timing = resolveTiming(now, route.delaySeconds, route.schedule, route.pausedUntil);
+    if (timing.action === 'drop') {
+      await this.store.upsertForward({
+        ...base,
+        state: 'dropped',
+        dropReason: timing.reason,
+        deliverAt: now,
+        preview: result.output.text.slice(0, 200),
+      });
+      return;
+    }
+
+    const payload: ForwardPayload = {
+      srcText: primary.text,
+      output: result.output,
+      removeButtons: result.removeButtons,
+    };
+
+    await this.persistAndDeliver(
+      {
         ...base,
         state: timing.action === 'send' ? 'queued' : timing.held ? 'held' : 'scheduled',
         deliverAt: timing.action === 'send' ? now : timing.deliverAt,
         preview: result.output.text.slice(0, 200),
         payload,
-      });
-    }
+      },
+      now,
+    );
+  }
+
+  /**
+   * Persist a forward; when it is due now and immediate delivery is on, it is
+   * written straight as `sending` (so no sender-loop claim can race it) and
+   * delivered in-process. A crash in between leaves a stale `sending` row,
+   * which the reaper parks as unconfirmed — never silently re-sent.
+   */
+  private async persistAndDeliver(record: NewForward, now: Date): Promise<void> {
+    const immediate =
+      this.opts.immediateDelivery &&
+      record.state === 'queued' &&
+      record.deliverAt.getTime() <= now.getTime();
+    const stored: NewForward = immediate ? { ...record, state: 'sending' } : record;
+
+    const { id, deduped } = await this.store.upsertForward(stored);
+    if (!immediate || deduped || !id) return;
+    await this.deliver({ ...stored, id, attempts: stored.attempts ?? 0, createdAt: now });
+  }
+
+  /** last_message_at + master_silent resolution: off the hot path, throttled. */
+  private touchMaster(masterId: string): void {
+    const nowMs = Date.now();
+    if (nowMs - (this.lastMasterTouch.get(masterId) ?? 0) < 30_000) return;
+    this.lastMasterTouch.set(masterId, nowMs);
+    const at = this.opts.clock();
+    void Promise.all([
+      this.store.setChannelLastMessage(masterId, at),
+      this.store.resolveIncidents('master_silent', { channelId: masterId }),
+    ]).catch((err) => console.error('[engine] master bookkeeping failed:', err));
   }
 
   // ── edits & deletes ───────────────────────────────────────────────────────
@@ -275,19 +399,22 @@ export class RelayEngine {
         output: result.output,
         removeButtons: result.removeButtons,
       };
-      await this.store.upsertForward({
-        routeId: route.id,
-        masterChannelId: master.id,
-        receiverChannelId: post.receiverChannelId,
-        srcMessageId: msg.messageId,
-        kind: 'edit',
-        state: 'queued',
-        deliverAt: now,
-        destMessageIds: post.destMessageIds,
-        mediaKind: msg.media,
-        preview: result.output.text.slice(0, 200),
-        payload,
-      });
+      await this.persistAndDeliver(
+        {
+          routeId: route.id,
+          masterChannelId: master.id,
+          receiverChannelId: post.receiverChannelId,
+          srcMessageId: msg.messageId,
+          kind: 'edit',
+          state: 'queued',
+          deliverAt: now,
+          destMessageIds: post.destMessageIds,
+          mediaKind: msg.media,
+          preview: result.output.text.slice(0, 200),
+          payload,
+        },
+        now,
+      );
     }
   }
 
@@ -313,16 +440,19 @@ export class RelayEngine {
         }
 
         if (post.state !== 'done' || !post.destMessageIds?.length) continue;
-        await this.store.upsertForward({
-          routeId: route.id,
-          masterChannelId: master.id,
-          receiverChannelId: post.receiverChannelId,
-          srcMessageId: srcId,
-          kind: 'delete',
-          state: 'queued',
-          deliverAt: now,
-          destMessageIds: post.destMessageIds,
-        });
+        await this.persistAndDeliver(
+          {
+            routeId: route.id,
+            masterChannelId: master.id,
+            receiverChannelId: post.receiverChannelId,
+            srcMessageId: srcId,
+            kind: 'delete',
+            state: 'queued',
+            deliverAt: now,
+            destMessageIds: post.destMessageIds,
+          },
+          now,
+        );
       }
     }
   }
@@ -434,6 +564,35 @@ export class RelayEngine {
     return this.cfg.accounts.find((a) => a.id === accountId)?.maxMsgsPerMinute ?? 20;
   }
 
+  /**
+   * Sliding-window rate limits that allow bursts: a post is only held back
+   * once a window is actually full, so normal traffic is never delayed.
+   * - per receiver: the sender's messages/minute (Telegram allows ~20/min per group)
+   * - per account: bots ~25/s; user accounts a conservative per-minute budget
+   * The check-and-record is synchronous, so parallel deliveries can't overshoot.
+   */
+  private pacingDelay(sender: Transport, receiverId: string, now: number): number {
+    if (sender.kind === 'sim') return 0; // no real limits to respect
+    const perMinute = this.ratePerMinute(sender.accountId);
+    const windows: [key: string, limit: number, spanMs: number][] = [
+      [`receiver:${receiverId}`, perMinute, 60_000],
+      sender.kind === 'bot'
+        ? [`account:${sender.accountId}`, BOT_MSGS_PER_SECOND, 1_000]
+        : [`account:${sender.accountId}`, perMinute * 4, 60_000],
+    ];
+
+    let delay = 0;
+    for (const [key, limit, spanMs] of windows) {
+      const recent = (this.sendWindows.get(key) ?? []).filter((t) => t > now - spanMs);
+      this.sendWindows.set(key, recent);
+      if (recent.length >= limit) delay = Math.max(delay, recent[0]! + spanMs - now);
+    }
+    if (delay === 0) {
+      for (const [key] of windows) this.sendWindows.get(key)!.push(now);
+    }
+    return delay;
+  }
+
   private async deliver(f: ForwardRecord): Promise<void> {
     const route = this.routesById.get(f.routeId);
     const receiver = this.channelsById.get(f.receiverChannelId);
@@ -456,22 +615,12 @@ export class RelayEngine {
       return;
     }
 
-    // pacing: per receiver and per sender account
     const now = this.opts.clock().getTime();
-    const slot = Math.max(
-      this.nextSlotByReceiver.get(receiver.id) ?? 0,
-      this.nextSlotByAccount.get(sender.accountId) ?? 0,
-    );
-    if (slot > now) {
-      await this.store.updateForward(f.id, { state: 'queued', deliverAt: new Date(slot) });
+    const wait = this.pacingDelay(sender, receiver.id, now);
+    if (wait > 0) {
+      await this.store.updateForward(f.id, { state: 'queued', deliverAt: new Date(now + wait) });
       return;
     }
-    // the simulator has no real rate limit — production pacing would make
-    // demo/e2e deliveries crawl at 3s per message
-    const interval =
-      sender.kind === 'sim' ? 0 : 60_000 / this.ratePerMinute(sender.accountId);
-    this.nextSlotByReceiver.set(receiver.id, now + interval);
-    this.nextSlotByAccount.set(sender.accountId, now + interval / 4);
 
     const payload = f.payload as ForwardPayload | undefined;
 
@@ -493,6 +642,7 @@ export class RelayEngine {
         done = {};
       } else {
         const destIds = await this.sendPost(f, route, master, receiver, sender, payload);
+        this.rememberSent(receiver.tgChatId, destIds);
         done = {
           destMessageIds: destIds,
           // the simulator has no telegram_accounts row — its literal id
@@ -507,10 +657,16 @@ export class RelayEngine {
     }
 
     await this.confirmDelivered(f.id, done);
+
+    // Recovery bookkeeping only when something was actually wrong — a healthy
+    // receiver must not pay two extra database round trips per message.
+    const recovering = this.consecutiveFails.has(route.id) || receiver.health !== 'ok';
     this.consecutiveFails.delete(route.id);
+    if (!recovering) return;
     try {
       await this.store.setChannelHealth(receiver.id, 'ok');
       await this.store.resolveIncidents('receiver_no_permission', { channelId: receiver.id });
+      receiver.health = 'ok';
     } catch (err) {
       // Bookkeeping only — never let it disturb a delivered forward.
       console.error('[engine] post-delivery bookkeeping failed:', err);

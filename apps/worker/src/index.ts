@@ -21,7 +21,7 @@ async function main(): Promise<void> {
   const store = new SupabaseStore(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, (k, t, b) => {
     void dispatcher?.dispatch(k, t, b);
   });
-  const engine = new RelayEngine(store);
+  const engine = new RelayEngine(store, { immediateDelivery: true });
 
   dispatcher = new AlertDispatcher({
     getSettings: () => store.getAlertSettings(),

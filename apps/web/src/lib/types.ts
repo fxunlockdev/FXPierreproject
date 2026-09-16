@@ -6,10 +6,26 @@ export type AccountKind = "user" | "bot";
 export type AccountStatus = "pending" | "connected" | "relogin_required" | "restricted" | "disabled";
 export type ForwardState = "queued" | "scheduled" | "held" | "sending" | "done" | "failed" | "dropped";
 
+export type ChatType = "channel" | "supergroup" | "group";
+
+/** A chat a connected account is in — filled by the worker as it sees them. */
+export interface DiscoveredChatRow {
+  account_id: string;
+  tg_chat_id: number | string;
+  chat_type: ChatType;
+  title: string;
+  username: string | null;
+  status: "administrator" | "member" | "restricted" | "left" | "kicked";
+  can_read: boolean;
+  can_post: boolean;
+  last_seen_at: string;
+}
+
 export interface ChannelRow {
   id: string;
   role: ChannelRole;
   tg_chat_id: number | string | null;
+  chat_type: ChatType | null;
   title: string;
   username: string | null;
   invite_link: string | null;
