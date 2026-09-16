@@ -218,6 +218,13 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     } catch {
       return reply.code(400).send({ error: 'Telegram rejected this bot token' });
     }
+    // Two connections polling one bot steal each other's updates.
+    const botId = String(probe.botInfo.id);
+    if (engine.config.accounts.some((a) => a.kind === 'bot' && a.tgId === botId)) {
+      return reply
+        .code(409)
+        .send({ error: `@${probe.botInfo.username} is already connected — add a different bot to share the load` });
+    }
 
     const accountId = await admin.insertAccount({
       kind: 'bot',

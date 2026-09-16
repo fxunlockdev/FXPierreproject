@@ -17,7 +17,8 @@ type Row = Record<string, unknown>;
 /** External alert hook — invoked after an in-app notification is written. */
 export type AlertSink = (kind: string, title: string, body: string) => void;
 
-const CONFIG_TABLES = ['channels', 'routes', 'telegram_accounts', 'channel_memberships'];
+// discovered_chats: a bot added to / removed from a chat changes who can send there
+const CONFIG_TABLES = ['channels', 'routes', 'telegram_accounts', 'channel_memberships', 'discovered_chats'];
 
 export class SupabaseStore implements Store {
   private sb: SupabaseClient;
@@ -38,17 +39,22 @@ export class SupabaseStore implements Store {
   }
 
   async loadConfig(): Promise<RelayConfig> {
-    const [accounts, channels, memberships, routes] = await Promise.all([
+    const [accounts, channels, memberships, routes, access] = await Promise.all([
       // deterministic order — Postgres heap order shifts as rows are updated
       this.sb.from('telegram_accounts').select('*').order('created_at'),
       this.sb.from('channels').select('*').order('created_at'),
       this.sb.from('channel_memberships').select('*'),
       this.sb.from('routes').select('*').order('created_at'),
+      this.sb
+        .from('discovered_chats')
+        .select('account_id, tg_chat_id, can_read, can_post')
+        .in('status', ['administrator', 'member', 'restricted']),
     ]);
     this.fail('accounts', accounts.error);
     this.fail('channels', channels.error);
     this.fail('memberships', memberships.error);
     this.fail('routes', routes.error);
+    this.fail('discovered_chats', access.error);
 
     return {
       accounts: (accounts.data ?? []).map((r: Row) => ({
@@ -105,6 +111,12 @@ export class SupabaseStore implements Store {
         rules: parseRouteRules(r['rules'], (detail) =>
           console.warn(`[store] route ${r['id']} has invalid rules (defaults used): ${detail}`),
         ),
+      })),
+      chatAccess: (access.data ?? []).map((r: Row) => ({
+        accountId: r['account_id'] as string,
+        tgChatId: String(r['tg_chat_id']),
+        canRead: r['can_read'] as boolean,
+        canPost: r['can_post'] as boolean,
       })),
     };
   }
@@ -221,10 +233,11 @@ export class SupabaseStore implements Store {
     state: ForwardRecord['state'];
     receiverChannelId: string;
     destMessageIds?: number[];
+    senderAccountId?: string;
   } | null> {
     const { data, error } = await this.sb
       .from('forwards')
-      .select('id, state, receiver_channel_id, dest_message_ids')
+      .select('id, state, receiver_channel_id, dest_message_ids, sender_account_id')
       .eq('route_id', routeId)
       .eq('kind', 'post')
       .or(`src_message_id.eq.${srcMessageId},src_message_ids.cs.{${srcMessageId}}`)
@@ -238,6 +251,7 @@ export class SupabaseStore implements Store {
       state: row['state'] as ForwardRecord['state'],
       receiverChannelId: row['receiver_channel_id'] as string,
       destMessageIds: (row['dest_message_ids'] as number[] | null)?.map(Number),
+      senderAccountId: (row['sender_account_id'] as string | null) ?? undefined,
     };
   }
 

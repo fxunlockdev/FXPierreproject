@@ -389,13 +389,22 @@ export class BotApiTransport implements Transport {
       }
 
       const album = opts.items;
+      const isAlbum = Boolean(album && album.length >= 2 && album.length === opts.srcMessageIds.length);
       if (
-        album &&
-        album.length >= 2 &&
-        album.length === opts.srcMessageIds.length &&
-        album.every((item) => item.fileId && GROUPABLE.has(item.media))
+        isAlbum &&
+        album!.every(
+          (item) =>
+            item.fileId &&
+            GROUPABLE.has(item.media) &&
+            // file ids belong to the bot that received them
+            (item.fileAccountId === undefined || item.fileAccountId === this.accountId),
+        )
       ) {
-        return await this.sendAlbum(chatId, album, opts);
+        return await this.sendAlbum(chatId, album!, opts);
+      }
+      if (isAlbum) {
+        // another bot read this album: copy it by message reference instead
+        return await this.copyAlbum(chatId, opts);
       }
 
       // Single posts, and the rare album we can't regroup: item by item.
@@ -455,6 +464,35 @@ export class BotApiTransport implements Transport {
     });
     const ids = sent.map((m) => m.message_id);
     await opts.onSent?.(ids.slice());
+    return ids;
+  }
+
+  /**
+   * Album we hold no file ids for: copyMessages keeps it grouped. The original
+   * caption is stripped in the same call and the transformed one set right
+   * after, so the source caption is never visible in the receiver.
+   */
+  private async copyAlbum(chatId: number, opts: SendOptions): Promise<number[]> {
+    const sent = await this.bot.api.copyMessages(chatId, Number(opts.fromChatId), opts.srcMessageIds, {
+      disable_notification: opts.silent,
+      remove_caption: true,
+      ...threadParam(opts.topicId),
+    });
+    const ids = sent.map((m) => m.message_id);
+    await opts.onSent?.(ids.slice());
+
+    const caption = (opts.applyCaption ?? true) ? opts.text : null;
+    if (caption && caption.text.length > 0 && ids[0] !== undefined) {
+      try {
+        await this.bot.api.editMessageCaption(chatId, ids[0], {
+          caption: caption.text,
+          caption_entities: toBotEntities(caption.entities) as never,
+        });
+      } catch (err) {
+        // the album is already out — failing here would re-send it
+        console.warn(`[bot:${this.username}] album delivered, caption not applied: ${errorText(err)}`);
+      }
+    }
     return ids;
   }
 

@@ -16,6 +16,8 @@ export interface AlbumItem {
   messageId: number;
   media: MediaKind;
   fileId?: string;
+  /** Telegram file ids are per bot: only this account may send by `fileId`. */
+  fileAccountId?: string;
   hasSpoiler?: boolean;
 }
 

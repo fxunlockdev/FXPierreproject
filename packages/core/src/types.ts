@@ -78,6 +78,8 @@ export interface RelayMessage {
    * chat is not a forum.
    */
   topicId?: number;
+  /** Account that received this message — file ids are only valid for it. */
+  readerAccountId?: string;
 }
 
 /** Context the pipeline needs to expand header/footer variables. */

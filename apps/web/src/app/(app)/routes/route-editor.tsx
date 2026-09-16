@@ -273,7 +273,7 @@ export function RouteEditor({
   };
 
   const senderOptions = [
-    { value: "auto", label: "Automatic (prefer bot)" },
+    { value: "auto", label: "Automatic — share the load across bots" },
     ...accounts
       .filter((a) => a.is_sender)
       .map((a) => ({ value: a.id, label: `${a.label} (${a.kind})` })),

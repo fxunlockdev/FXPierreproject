@@ -68,6 +68,8 @@ export class RelayEngine {
   private channelsById = new Map<string, Channel>();
   private routesByMaster = new Map<string, Route[]>();
   private routesById = new Map<string, Route>();
+  /** tg chat id → account id → rights there (from discovery) */
+  private accessByChat = new Map<string, Map<string, { canRead: boolean; canPost: boolean }>>();
 
   private transports = new Map<string, Transport>();
   private albumBuffer = new Map<
@@ -90,7 +92,7 @@ export class RelayEngine {
   private opts: Required<EngineOptions>;
 
   readonly handlers: ReaderHandlers = {
-    onPost: (_accountId, msg) => this.ingest(msg),
+    onPost: (accountId, msg) => this.ingest({ ...msg, readerAccountId: msg.readerAccountId ?? accountId }),
     onEdit: (_accountId, msg) => this.inOrder(msg.chatId, () => this.handleEdit(msg)),
     onDelete: (_accountId, chatId, ids) => this.inOrder(chatId, () => this.handleDelete(chatId, ids)),
     onChatSeen: (accountId, chat) =>
@@ -153,6 +155,12 @@ export class RelayEngine {
       const list = this.routesByMaster.get(r.masterId) ?? [];
       list.push(r);
       this.routesByMaster.set(r.masterId, list);
+    }
+    this.accessByChat.clear();
+    for (const a of this.cfg.chatAccess ?? []) {
+      const perAccount = this.accessByChat.get(a.tgChatId) ?? new Map();
+      perAccount.set(a.accountId, { canRead: a.canRead, canPost: a.canPost });
+      this.accessByChat.set(a.tgChatId, perAccount);
     }
   }
 
@@ -348,6 +356,7 @@ export class RelayEngine {
               messageId: m.messageId,
               media: m.media,
               fileId: m.fileId,
+              fileAccountId: m.readerAccountId,
               hasSpoiler: m.hasSpoiler,
             })),
           }
@@ -450,6 +459,7 @@ export class RelayEngine {
           receiverChannelId: post.receiverChannelId,
           srcMessageId: msg.messageId,
           kind: 'edit',
+          senderAccountId: post.senderAccountId,
           state: 'queued',
           deliverAt: now,
           destMessageIds: post.destMessageIds,
@@ -491,6 +501,7 @@ export class RelayEngine {
             receiverChannelId: post.receiverChannelId,
             srcMessageId: srcId,
             kind: 'delete',
+            senderAccountId: post.senderAccountId,
             state: 'queued',
             deliverAt: now,
             destMessageIds: post.destMessageIds,
@@ -580,21 +591,66 @@ export class RelayEngine {
     return [...this.transports.values()].find((t) => t.kind === 'sim');
   }
 
-  private pickSender(route: Route, receiver: Channel): Transport | undefined {
-    if (route.senderAccountId) {
-      const t = this.transports.get(route.senderAccountId);
-      if (t) return t;
+  /** Discovery says this account can post in the receiver (or a user-account membership does). */
+  private canPostTo(accountId: string, receiver: Channel): boolean {
+    if (this.cfg.memberships.some((m) => m.accountId === accountId && m.channelId === receiver.id && m.canPost)) {
+      return true;
     }
-    const canPost = this.cfg.memberships
-      .filter((m) => m.channelId === receiver.id && m.canPost)
-      .map((m) => m.accountId);
-    const candidates = this.cfg.accounts
-      .filter((a) => a.isSender && a.status === 'connected' && canPost.includes(a.id))
-      .sort((a, b) => (a.kind === 'bot' ? -1 : 1) - (b.kind === 'bot' ? -1 : 1));
-    for (const acc of candidates) {
-      const t = this.transports.get(acc.id);
-      if (t) return t;
+    return Boolean(receiver.tgChatId && this.accessByChat.get(receiver.tgChatId)?.get(accountId)?.canPost);
+  }
+
+  /** The account is in the master, so it can copy or forward that chat's posts. */
+  private canAccess(accountId: string, master: Channel): boolean {
+    if (this.cfg.memberships.some((m) => m.accountId === accountId && m.channelId === master.id && m.isMember)) {
+      return true;
     }
+    return Boolean(master.tgChatId && this.accessByChat.get(master.tgChatId)?.has(accountId));
+  }
+
+  /**
+   * Who posts this forward. With several bots (or accounts) able to post to the
+   * receiver, the load is spread: prefer whoever can send right now without
+   * hitting a Telegram rate limit, then whoever sent least in the last minute.
+   * Pinned cases skip balancing: the route names a sender, or the message
+   * being edited / deleted / resumed was sent by a specific account.
+   */
+  private pickSender(
+    route: Route,
+    receiver: Channel,
+    master: Channel,
+    opts: { needsSourceAccess: boolean; stickyAccountId?: string; fileAccountId?: string },
+  ): Transport | undefined {
+    const connected = (id: string | null | undefined): Transport | undefined => {
+      if (!id) return undefined;
+      const account = this.cfg.accounts.find((a) => a.id === id);
+      if (account && account.status !== 'connected') return undefined;
+      return this.transports.get(id);
+    };
+    const pinned = connected(route.senderAccountId) ?? connected(opts.stickyAccountId);
+    if (pinned) return pinned;
+
+    const eligible = this.cfg.accounts
+      .filter((a) => a.isSender && a.status === 'connected' && this.transports.has(a.id))
+      .filter((a) => this.canPostTo(a.id, receiver))
+      .filter((a) => !opts.needsSourceAccess || this.canAccess(a.id, master))
+      .map((a) => this.transports.get(a.id)!);
+
+    if (eligible.length > 0) {
+      const now = this.opts.clock().getTime();
+      const ranked = eligible.map((t, order) => ({ t, order, ...this.pacingPeek(t, receiver.id, now) }));
+      ranked.sort(
+        (a, b) =>
+          a.delay - b.delay ||
+          // the reader of an album holds its file ids: one grouped send, no caption edit
+          Number(b.t.accountId === opts.fileAccountId) - Number(a.t.accountId === opts.fileAccountId) ||
+          a.load - b.load ||
+          Number(b.t.kind === 'bot') - Number(a.t.kind === 'bot') ||
+          a.order - b.order,
+      );
+      return ranked[0]!.t;
+    }
+
+    // No rights known yet (e.g. just connected): any connected sender, then the simulator.
     for (const acc of this.cfg.accounts) {
       if (acc.isSender && acc.status === 'connected') {
         const t = this.transports.get(acc.id);
@@ -611,20 +667,39 @@ export class RelayEngine {
   /**
    * Sliding-window rate limits that allow bursts: a post is only held back
    * once a window is actually full, so normal traffic is never delayed.
-   * - per receiver: the sender's messages/minute (Telegram allows ~20/min per group)
-   * - per account: bots ~25/s; user accounts a conservative per-minute budget
-   * The check-and-record is synchronous, so parallel deliveries can't overshoot.
+   * - per sender per receiver: Telegram's per-chat limit applies to each bot
+   *   separately (~20/min in groups) — which is why more bots = more capacity
+   * - per sender: bots ~25/s; user accounts a conservative per-minute budget
    */
-  private pacingDelay(sender: Transport, receiverId: string, now: number): number {
-    if (sender.kind === 'sim') return 0; // no real limits to respect
+  private pacingWindows(sender: Transport, receiverId: string): [key: string, limit: number, spanMs: number][] {
     const perMinute = this.ratePerMinute(sender.accountId);
-    const windows: [key: string, limit: number, spanMs: number][] = [
-      [`receiver:${receiverId}`, perMinute, 60_000],
+    return [
+      [`receiver:${sender.accountId}:${receiverId}`, perMinute, 60_000],
       sender.kind === 'bot'
         ? [`account:${sender.accountId}`, BOT_MSGS_PER_SECOND, 1_000]
         : [`account:${sender.accountId}`, perMinute * 4, 60_000],
     ];
+  }
 
+  /** How long this sender would have to wait, and how busy it has been — without recording a send. */
+  private pacingPeek(sender: Transport, receiverId: string, now: number): { delay: number; load: number } {
+    if (sender.kind === 'sim') return { delay: 0, load: 0 };
+    let delay = 0;
+    for (const [key, limit, spanMs] of this.pacingWindows(sender, receiverId)) {
+      const recent = (this.sendWindows.get(key) ?? []).filter((t) => t > now - spanMs);
+      if (recent.length >= limit) delay = Math.max(delay, recent[0]! + spanMs - now);
+    }
+    const load = (this.sendWindows.get(`load:${sender.accountId}`) ?? []).filter((t) => t > now - 60_000).length;
+    return { delay, load };
+  }
+
+  /**
+   * Check-and-record in one synchronous step, so parallel deliveries can't
+   * overshoot a limit. Returns the wait in ms (0 = send now, and it's recorded).
+   */
+  private pacingDelay(sender: Transport, receiverId: string, now: number): number {
+    if (sender.kind === 'sim') return 0; // no real limits to respect
+    const windows = this.pacingWindows(sender, receiverId);
     let delay = 0;
     for (const [key, limit, spanMs] of windows) {
       const recent = (this.sendWindows.get(key) ?? []).filter((t) => t > now - spanMs);
@@ -633,6 +708,10 @@ export class RelayEngine {
     }
     if (delay === 0) {
       for (const [key] of windows) this.sendWindows.get(key)!.push(now);
+      const loadKey = `load:${sender.accountId}`;
+      const load = (this.sendWindows.get(loadKey) ?? []).filter((t) => t > now - 60_000);
+      load.push(now);
+      this.sendWindows.set(loadKey, load);
     }
     return delay;
   }
@@ -650,7 +729,15 @@ export class RelayEngine {
       return;
     }
 
-    const sender = this.pickSender(route, receiver);
+    const payloadItems = (f.payload as ForwardPayload | undefined)?.items;
+    const sender = this.pickSender(route, receiver, master, {
+      // copying media or forwarding reads the source post; plain text does not
+      needsSourceAccess:
+        f.kind === 'post' && (route.mode === 'forward' || (f.mediaKind ?? 'text') !== 'text'),
+      // edits, deletes and half-sent albums must stay with the account that posted them
+      stickyAccountId: f.kind !== 'post' || f.destMessageIds?.length ? f.senderAccountId : undefined,
+      fileAccountId: payloadItems?.[0]?.fileAccountId,
+    });
     if (!sender) {
       await this.store.updateForward(f.id, {
         state: 'failed',
@@ -758,7 +845,11 @@ export class RelayEngine {
 
     const checkpoint = async (sentSoFar: number[]) => {
       try {
-        await this.store.updateForward(f.id, { destMessageIds: [...already, ...sentSoFar] });
+        await this.store.updateForward(f.id, {
+          destMessageIds: [...already, ...sentSoFar],
+          // a resume must use this same account
+          ...(sender.kind !== 'sim' ? { senderAccountId: sender.accountId } : {}),
+        });
       } catch {
         // best-effort: a lost checkpoint at worst re-sends one album item
       }

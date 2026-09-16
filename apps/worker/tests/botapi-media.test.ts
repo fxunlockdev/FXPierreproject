@@ -265,3 +265,55 @@ describe('forum topics (groups with Topics enabled)', () => {
     for (const call of calls) expect(call.args.at(-1)).not.toHaveProperty('message_thread_id');
   });
 });
+
+describe('several bots — albums read by another bot', () => {
+  it('uses the file ids only when they belong to this bot', async () => {
+    const { t, calls } = recordingBot(); // this bot is acc-bot
+    await t.copy(
+      send({
+        mediaKind: 'photo', srcMessageIds: [1, 2], text: text('setup'),
+        items: [
+          { messageId: 1, media: 'photo', fileId: 'mine-1', fileAccountId: 'acc-bot' },
+          { messageId: 2, media: 'photo', fileId: 'mine-2', fileAccountId: 'acc-bot' },
+        ],
+      }),
+    );
+    expect(calls.map((c) => c.method)).toEqual(['sendMediaGroup']);
+  });
+
+  it("copies another bot's album by reference: still grouped, original caption stripped, new caption set", async () => {
+    const { t, calls } = recordingBot();
+    (t.bot.api as unknown as Record<string, unknown>).editMessageCaption = vi.fn(async (...args: unknown[]) => {
+      calls.push({ method: 'editMessageCaption', args });
+      return true;
+    });
+    const ids = await t.copy(
+      send({
+        mediaKind: 'photo', srcMessageIds: [1, 2, 3], text: text('3 setups'),
+        items: [1, 2, 3].map((n) => ({ messageId: n, media: 'photo' as const, fileId: `theirs-${n}`, fileAccountId: 'other-bot' })),
+      }),
+    );
+
+    expect(ids).toHaveLength(3);
+    expect(calls.map((c) => c.method)).toEqual(['copyMessages', 'editMessageCaption']);
+    expect(calls[0]!.args[2]).toEqual([1, 2, 3]);
+    expect(calls[0]!.args[3]).toMatchObject({ remove_caption: true });
+    expect(calls[1]!.args.slice(0, 2)).toEqual([Number(TO), ids[0]]);
+    expect(calls[1]!.args[2]).toMatchObject({ caption: '3 setups' });
+  });
+
+  it('a failed caption edit never fails the delivery (the album is already out)', async () => {
+    const { t, calls } = recordingBot();
+    (t.bot.api as unknown as Record<string, unknown>).editMessageCaption = vi.fn(async () => {
+      throw new Error('boom');
+    });
+    const ids = await t.copy(
+      send({
+        mediaKind: 'photo', srcMessageIds: [1, 2], text: text('caption'),
+        items: [1, 2].map((n) => ({ messageId: n, media: 'photo' as const, fileId: `x${n}`, fileAccountId: 'other' })),
+      }),
+    );
+    expect(ids).toHaveLength(2);
+    expect(calls.map((c) => c.method)).toEqual(['copyMessages']);
+  });
+});

@@ -277,7 +277,7 @@ function AddBotDialog() {
       </DialogTrigger>
       <DialogContent
         title="Add a bot"
-        description="Create one with @BotFather, then add it as admin in every receiver channel."
+        description="Create one with @BotFather and make it admin in your masters and receivers. Each extra bot adds its own Telegram rate limits — the relay spreads posts across all of them automatically."
       >
         <form onSubmit={submit} className="flex flex-col gap-4">
           <Field label="Label">

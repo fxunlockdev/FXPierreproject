@@ -743,3 +743,87 @@ describe('RelayEngine — forum topics', () => {
     expect(store.topics.get(`${MASTER_TG}:5`)).toBe('Gold');
   });
 });
+
+describe('RelayEngine — several bots share the sending load', () => {
+  /** A simulator that presents itself as a real bot, so rate limits apply. */
+  const botSim = (accountId: string): SimTransport => {
+    const s = new SimTransport(accountId);
+    Object.defineProperty(s, 'kind', { value: 'bot' });
+    return s;
+  };
+
+  const bot = (id: string, perMinute: number) => ({
+    id, kind: 'bot' as const, label: id, status: 'connected' as const,
+    isReader: true, isSender: true, isAlertSender: false, maxMsgsPerMinute: perMinute,
+  });
+
+  async function twoBots(opts: { perMinute?: number; bRights?: { master: boolean; receiverPost: boolean } } = {}) {
+    const perMinute = opts.perMinute ?? 20;
+    const bRights = opts.bRights ?? { master: true, receiverPost: true };
+    nowMs = new Date('2026-09-15T10:00:00Z').getTime();
+    store = new MemoryStore();
+    store.config = baseConfig();
+    store.config.accounts = [bot('bot-a', perMinute), bot('bot-b', perMinute)];
+    store.config.memberships = [];
+    store.config.chatAccess = [
+      { accountId: 'bot-a', tgChatId: MASTER_TG, canRead: true, canPost: true },
+      { accountId: 'bot-a', tgChatId: RECEIVER1_TG, canRead: true, canPost: true },
+      ...(bRights.master ? [{ accountId: 'bot-b', tgChatId: MASTER_TG, canRead: true, canPost: true }] : []),
+      { accountId: 'bot-b', tgChatId: RECEIVER1_TG, canRead: true, canPost: bRights.receiverPost },
+    ];
+    const a = botSim('bot-a');
+    const b = botSim('bot-b');
+    engine = new RelayEngine(store, { albumWaitMs: 15, clock, immediateDelivery: true });
+    engine.registerTransport(a);
+    engine.registerTransport(b);
+    await engine.init();
+    await a.start(engine.handlers);
+    await b.start(engine.handlers);
+    return { a, b };
+  }
+
+  it('a burst one bot would have to throttle goes out immediately through two', async () => {
+    const { a, b } = await twoBots({ perMinute: 3 }); // each bot: 3 posts/minute to this receiver
+    for (let i = 0; i < 6; i += 1) await a.injectPost(MASTER_TG, `signal ${i}`, { messageId: 100 + i });
+
+    expect(a.sent.length + b.sent.length).toBe(6); // nothing waiting
+    expect(a.sent).toHaveLength(3);
+    expect(b.sent).toHaveLength(3);
+    expect([...store.forwards.values()].every((f) => f.state === 'done')).toBe(true);
+  });
+
+  it('with steady traffic the bots take turns', async () => {
+    const { a, b } = await twoBots();
+    for (let i = 0; i < 4; i += 1) await a.injectPost(MASTER_TG, `post ${i}`, { messageId: 200 + i });
+    expect(a.sent).toHaveLength(2);
+    expect(b.sent).toHaveLength(2);
+  });
+
+  it('an edit goes out through the same bot that sent the post', async () => {
+    const { a, b } = await twoBots();
+    await a.injectPost(MASTER_TG, 'first', { messageId: 300 }); // → bot-a
+    await a.injectPost(MASTER_TG, 'entry 1.0850', { messageId: 301 }); // → bot-b (less loaded)
+    expect(b.sent.map((s) => s.text.text)).toEqual(['entry 1.0850']);
+
+    await a.injectEdit(MASTER_TG, 301, 'entry 1.0900');
+    expect(b.edits.map((e) => e.text.text)).toEqual(['entry 1.0900']);
+    expect(a.edits).toHaveLength(0);
+  });
+
+  it('never picks a bot that has no post rights in the receiver', async () => {
+    const { a, b } = await twoBots({ bRights: { master: true, receiverPost: false } });
+    for (let i = 0; i < 4; i += 1) await a.injectPost(MASTER_TG, `post ${i}`, { messageId: 400 + i });
+    expect(a.sent).toHaveLength(4);
+    expect(b.sent).toHaveLength(0);
+  });
+
+  it('media only goes through bots that are in the master (they copy from it)', async () => {
+    const { a, b } = await twoBots({ bRights: { master: false, receiverPost: true } });
+    await a.injectPost(MASTER_TG, 'text 1', { messageId: 500 }); // text needs no master access → a (tie)
+    await a.injectPost(MASTER_TG, 'text 2', { messageId: 501 }); // → b (less loaded)
+    await a.injectPost(MASTER_TG, 'chart', { messageId: 502, media: 'photo' }); // b can't copy it → a
+
+    expect(b.sent.map((s) => s.text.text)).toEqual(['text 2']);
+    expect(a.sent.map((s) => s.text.text)).toEqual(['text 1', 'chart']);
+  });
+});

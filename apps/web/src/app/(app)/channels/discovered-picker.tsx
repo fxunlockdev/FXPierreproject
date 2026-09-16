@@ -45,9 +45,26 @@ export function DiscoveredPicker({
       .filter((c) => c.role === role && c.tg_chat_id != null)
       .map((c) => String(c.tg_chat_id)),
   );
-  const chats = (discovered ?? []).filter(
-    (c) => PRESENT.has(c.status) && !alreadyAdded.has(String(c.tg_chat_id)),
-  );
+  // With several bots, each reports the same chat: merge them, rights = any bot.
+  const byChat = new Map<string, DiscoveredChatRow & { bots: number }>();
+  for (const c of discovered ?? []) {
+    const id = String(c.tg_chat_id);
+    if (!PRESENT.has(c.status) || alreadyAdded.has(id)) continue;
+    const merged = byChat.get(id);
+    byChat.set(
+      id,
+      merged
+        ? {
+            ...merged,
+            can_read: merged.can_read || c.can_read,
+            can_post: merged.can_post || c.can_post,
+            is_forum: merged.is_forum || c.is_forum,
+            bots: merged.bots + 1,
+          }
+        : { ...c, bots: 1 },
+    );
+  }
+  const chats = [...byChat.values()];
   const bot = (accounts ?? []).find((a) => a.kind === "bot" && a.username);
 
   if (isLoading) return <Skeleton className="h-24" />;
@@ -71,7 +88,7 @@ export function DiscoveredPicker({
         const missing = missingRight(chat, role);
         const Icon = chat.chat_type === "channel" ? Megaphone : UsersThree;
         return (
-          <li key={`${chat.account_id}:${id}`} className="flex items-center gap-3 px-3 py-2.5">
+          <li key={id} className="flex items-center gap-3 px-3 py-2.5">
             <Icon size={17} className="shrink-0 text-faint" />
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
@@ -89,6 +106,7 @@ export function DiscoveredPicker({
                   <>
                     <CheckCircle size={12} weight="fill" className="shrink-0 text-live" />
                     {chat.username ? `@${chat.username}` : "private"} · ready
+                    {chat.bots > 1 && ` · ${chat.bots} bots`}
                   </>
                 )}
               </p>

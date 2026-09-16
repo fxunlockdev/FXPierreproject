@@ -75,11 +75,22 @@ export interface Route {
   targetTopicId?: number | null;
 }
 
+/** What an account can do in a Telegram chat, as discovered by the worker. */
+export interface ChatAccess {
+  accountId: string;
+  tgChatId: string;
+  /** In the chat and able to see its posts (needed to copy/forward from it). */
+  canRead: boolean;
+  canPost: boolean;
+}
+
 export interface RelayConfig {
   accounts: Account[];
   channels: Channel[];
   memberships: Membership[];
   routes: Route[];
+  /** Per-account rights in chats — lets several bots share the sending load. */
+  chatAccess?: ChatAccess[];
 }
 
 export interface ForwardRecord {

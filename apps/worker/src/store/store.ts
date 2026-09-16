@@ -51,6 +51,8 @@ export interface Store {
     state: ForwardRecord['state'];
     receiverChannelId: string;
     destMessageIds?: number[];
+    /** The account that sent it — edits/deletes must go through the same one. */
+    senderAccountId?: string;
   } | null>;
   countPending(): Promise<number>;
 
