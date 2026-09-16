@@ -5,6 +5,14 @@ import { NextResponse, type NextRequest } from "next/server";
  * header for its own inline scripts; our theme script reads it via x-nonce.
  */
 export function middleware(request: NextRequest) {
+  // one canonical host: auth cookies are per-host, so www and the bare domain
+  // would otherwise be two separate sign-ins
+  const host = request.headers.get("host") ?? "";
+  if (host.startsWith("www.")) {
+    const { pathname, search } = request.nextUrl;
+    return NextResponse.redirect(new URL(`${pathname}${search}`, `https://${host.slice(4)}`), 308);
+  }
+
   const nonce = Buffer.from(crypto.randomUUID()).toString("base64");
   const isDev = process.env.NODE_ENV !== "production";
 
