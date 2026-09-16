@@ -3,9 +3,15 @@
 import { useEffect, useRef, useState } from "react";
 import { QueryClient, QueryClientProvider, useQueryClient } from "@tanstack/react-query";
 import { Toaster } from "sonner";
+import { SpaceProvider } from "@/lib/space";
 import { supabaseBrowser } from "@/lib/supabase/client";
+import type { SpaceInfo } from "@/lib/types";
 
-/** Realtime → react-query bridge: DB changes invalidate the matching caches. */
+/**
+ * Realtime → react-query bridge: DB changes invalidate the matching caches.
+ * Realtime enforces row-level security, so only changes in the user's own
+ * spaces ever arrive here.
+ */
 function RealtimeBridge() {
   const qc = useQueryClient();
   const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
@@ -27,7 +33,6 @@ function RealtimeBridge() {
       forwards: "forwards",
       incidents: "incidents",
       notifications: "notifications",
-      worker_status: "worker_status",
       channels: "channels",
       routes: "routes",
       telegram_accounts: "accounts",
@@ -56,7 +61,17 @@ function RealtimeBridge() {
   return null;
 }
 
-export function Providers({ children }: { children: React.ReactNode }) {
+export function Providers({
+  children,
+  spaces,
+  initialSpaceId,
+  isPlatformAdmin,
+}: {
+  children: React.ReactNode;
+  spaces: SpaceInfo[];
+  initialSpaceId: string;
+  isPlatformAdmin: boolean;
+}) {
   const [client] = useState(
     () =>
       new QueryClient({
@@ -68,8 +83,10 @@ export function Providers({ children }: { children: React.ReactNode }) {
 
   return (
     <QueryClientProvider client={client}>
-      <RealtimeBridge />
-      {children}
+      <SpaceProvider spaces={spaces} initialSpaceId={initialSpaceId} isPlatformAdmin={isPlatformAdmin}>
+        <RealtimeBridge />
+        {children}
+      </SpaceProvider>
       <Toaster
         position="bottom-right"
         toastOptions={{

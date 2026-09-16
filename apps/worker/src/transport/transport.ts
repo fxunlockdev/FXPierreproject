@@ -97,7 +97,7 @@ export interface ReaderHandlers {
   /** A basic group became a supergroup and got a new id. */
   onChatMigrated?(oldChatId: string, newChatId: string): void | Promise<void>;
   /** A message revealed a forum topic (title is '' when Telegram didn't say). */
-  onTopicSeen?(chatId: string, topicId: number, title: string): void | Promise<void>;
+  onTopicSeen?(accountId: string, chatId: string, topicId: number, title: string): void | Promise<void>;
 }
 
 /**

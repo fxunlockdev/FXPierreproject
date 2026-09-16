@@ -31,19 +31,43 @@ function RelayGraphic() {
   );
 }
 
+type Mode = "signin" | "signup";
+
+function friendlySignUpError(message: string): string {
+  if (/already registered|already exists/i.test(message)) {
+    return "An account with this email already exists. Sign in instead.";
+  }
+  if (/invalid or expired invite/i.test(message)) return "That invite code is invalid or has expired.";
+  if (/sign-ups are closed|database error/i.test(message)) {
+    return "Sign-ups are closed right now. Ask a space owner for an invite code.";
+  }
+  return message;
+}
+
 function LoginForm() {
   const router = useRouter();
   const params = useSearchParams();
-  const [mode, setMode] = useState<"signin" | "activate">("signin");
+  const [mode, setMode] = useState<Mode>(params.get("mode") === "signup" ? "signup" : "signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [error, setError] = useState<string | null>(
-    params.get("reason") === "not-invited"
-      ? "This account is not on the member list. Ask an admin to invite you."
-      : null,
-  );
+  const [spaceName, setSpaceName] = useState("");
+  const [inviteCode, setInviteCode] = useState(params.get("code") ?? "");
+  const [joining, setJoining] = useState(Boolean(params.get("code")));
+  const [signupsClosed, setSignupsClosed] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+
+  const switchMode = async (next: Mode) => {
+    setMode(next);
+    setError(null);
+    setNotice(null);
+    if (next !== "signup") return;
+    const { data } = await supabaseBrowser().rpc("check_signup", { p_code: null });
+    const closed = data === "closed";
+    setSignupsClosed(closed);
+    if (closed) setJoining(true);
+  };
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -51,17 +75,27 @@ function LoginForm() {
     setError(null);
     const sb = supabaseBrowser();
     try {
-      if (mode === "activate") {
-        const { data: signUpData, error: signUpErr } = await sb.auth.signUp({ email, password });
-        if (signUpErr) {
-          throw new Error(
-            /invite-only|database error/i.test(signUpErr.message)
-              ? "That email has not been invited. Ask an admin to add you first."
-              : signUpErr.message,
-          );
+      if (mode === "signup") {
+        const code = joining ? inviteCode.trim() : "";
+        const { data: verdict, error: checkErr } = await sb.rpc("check_signup", { p_code: code || null });
+        if (checkErr) throw new Error(checkErr.message);
+        if (verdict === "closed") {
+          setSignupsClosed(true);
+          setJoining(true);
+          throw new Error("Sign-ups are closed right now. Ask a space owner for an invite code.");
         }
-        // With email confirmation enabled (production), signUp returns no
-        // session — the account activates via the link in their inbox.
+        if (verdict === "invalid_code") throw new Error("That invite code is invalid or has expired.");
+
+        const { data: signUpData, error: signUpErr } = await sb.auth.signUp({
+          email,
+          password,
+          options: {
+            data: code ? { invite_code: code } : { space_name: spaceName.trim() || undefined },
+          },
+        });
+        if (signUpErr) throw new Error(friendlySignUpError(signUpErr.message));
+        // With email confirmation enabled, signUp returns no session — the
+        // account activates via the link in the inbox.
         if (!signUpData.session) {
           setNotice("Almost there — open the confirmation link we just emailed you, then sign in.");
           setMode("signin");
@@ -79,16 +113,18 @@ function LoginForm() {
     }
   };
 
+  const signup = mode === "signup";
+
   return (
     <form onSubmit={submit} className="flex w-full max-w-sm flex-col gap-4">
       <div>
-        <h1 className="text-xl font-semibold tracking-tight">
-          {mode === "signin" ? "Sign in" : "Activate your invite"}
-        </h1>
+        <h1 className="text-xl font-semibold tracking-tight">{signup ? "Create your account" : "Sign in"}</h1>
         <p className="mt-1 text-[13px] leading-relaxed text-mute">
-          {mode === "signin"
-            ? "Access is invite-only. Use the email an admin added for you."
-            : "First time here? Set a password for your invited email."}
+          {signup
+            ? joining
+              ? "Joining a team? Enter the invite code a space owner gave you."
+              : "You get your own private space — your bots, channels and logs are visible only to you and the teammates you invite."
+            : "Welcome back. Your spaces are waiting."}
         </p>
       </div>
 
@@ -102,17 +138,55 @@ function LoginForm() {
           placeholder="you@company.com"
         />
       </Field>
-      <Field label="Password" hint={mode === "activate" ? "At least 8 characters." : undefined}>
+      <Field label="Password" hint={signup ? "At least 8 characters." : undefined}>
         <Input
           type="password"
           required
-          minLength={mode === "activate" ? 8 : undefined}
-          autoComplete={mode === "signin" ? "current-password" : "new-password"}
+          minLength={signup ? 8 : undefined}
+          autoComplete={signup ? "new-password" : "current-password"}
           value={password}
           onChange={(e) => setPassword(e.target.value)}
           placeholder="••••••••••"
         />
       </Field>
+
+      {signup && !joining && (
+        <Field label="Space name" hint="Optional — you can rename it later.">
+          <Input
+            value={spaceName}
+            maxLength={80}
+            onChange={(e) => setSpaceName(e.target.value)}
+            placeholder="Acme signals"
+          />
+        </Field>
+      )}
+      {signup && signupsClosed && (
+        <p role="status" className="rounded-lg border border-warn/30 bg-warn-soft px-3 py-2 text-[13px] text-warn">
+          New sign-ups are closed right now — you can still join with an invite code from a space owner.
+        </p>
+      )}
+      {signup && joining && (
+        <Field label="Invite code">
+          <Input
+            required
+            value={inviteCode}
+            onChange={(e) => setInviteCode(e.target.value.toUpperCase())}
+            placeholder="ABCDE-FGH23"
+            autoComplete="off"
+            spellCheck={false}
+            className="font-mono tracking-wider"
+          />
+        </Field>
+      )}
+      {signup && !signupsClosed && (
+        <button
+          type="button"
+          onClick={() => setJoining(!joining)}
+          className="-mt-1 text-left text-[12.5px] text-mute underline-offset-4 transition-colors hover:text-ink hover:underline"
+        >
+          {joining ? "No code? Create a new space instead" : "Have an invite code? Join a team"}
+        </button>
+      )}
 
       {error && (
         <p role="alert" className="rounded-lg border border-danger/30 bg-danger-soft px-3 py-2 text-[13px] text-danger">
@@ -126,18 +200,15 @@ function LoginForm() {
       )}
 
       <Button type="submit" variant="primary" loading={busy}>
-        {mode === "signin" ? "Sign in" : "Create password & sign in"}
+        {signup ? (joining ? "Create account & join" : "Create account") : "Sign in"}
       </Button>
 
       <button
         type="button"
-        onClick={() => {
-          setMode(mode === "signin" ? "activate" : "signin");
-          setError(null);
-        }}
+        onClick={() => void switchMode(signup ? "signin" : "signup")}
         className="text-left text-[13px] text-mute underline-offset-4 transition-colors hover:text-ink hover:underline"
       >
-        {mode === "signin" ? "First time here? Activate your invite" : "Already activated? Sign in"}
+        {signup ? "Already have an account? Sign in" : "New here? Create an account"}
       </button>
     </form>
   );

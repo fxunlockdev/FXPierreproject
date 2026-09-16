@@ -16,6 +16,7 @@ import { TransportError, type Transport } from './transport/transport';
 
 export interface AdminOps {
   insertAccount(fields: {
+    spaceId: string;
     kind: 'user' | 'bot';
     label: string;
     phone?: string;
@@ -28,6 +29,9 @@ export interface AdminOps {
     channelId: string,
     meta: { tgChatId: string; title: string; username?: string; isProtected: boolean },
   ): Promise<void>;
+  spaceOf(table: 'channels' | 'forwards', id: string): Promise<string | null>;
+  spaceIsActive(spaceId: string): Promise<boolean>;
+  findTelegramIdentity(kind: 'user' | 'bot', tgId: string): Promise<{ spaceId: string } | null>;
   upsertMembership(m: {
     accountId: string;
     channelId: string;
@@ -60,7 +64,12 @@ interface PendingLogin {
   codeResolve?: (code: string) => void;
   passwordResolve?: (pw: string) => void;
   createdAt: number;
+  spaceId: string;
 }
+
+const SPACE_HEADER = 'x-space-id';
+const IDENTITY_TAKEN =
+  'This Telegram account is already connected to a space — each bot or account can serve one space only';
 
 /** Abandoned phone-login sessions are swept after this long. */
 const LOGIN_TTL_MS = 15 * 60_000;
@@ -72,7 +81,7 @@ const safeEqual = (a: string, b: string): boolean => {
 };
 
 export function buildServer(deps: ServerDeps): FastifyInstance {
-  const { env, engine, store, admin, dispatcher, sim } = deps;
+  const { env, engine, store, admin, sim } = deps;
   const app = Fastify({ logger: false });
   const logins = new Map<string, PendingLogin>();
 
@@ -86,6 +95,27 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     }
     done();
   });
+
+  /**
+   * Every admin action runs inside ONE space. The dashboard proxy has already
+   * verified the signed-in user is an admin of the space it names here.
+   */
+  const requireSpace = async (
+    req: { headers: Record<string, string | string[] | undefined> },
+    reply: { code(n: number): { send(b: unknown): unknown } },
+  ): Promise<string | null> => {
+    const raw = req.headers[SPACE_HEADER];
+    const spaceId = typeof raw === 'string' ? raw : '';
+    if (!z.string().uuid().safeParse(spaceId).success) {
+      reply.code(400).send({ error: 'missing space' });
+      return null;
+    }
+    if (admin && !(await admin.spaceIsActive(spaceId))) {
+      reply.code(403).send({ error: 'this space is not active' });
+      return null;
+    }
+    return spaceId;
+  };
 
   app.get('/health', async () => ({
     ok: true,
@@ -101,6 +131,8 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       return reply.code(400).send({ error: 'TELEGRAM_API_ID / TELEGRAM_API_HASH are not configured on the worker' });
     }
     if (!admin) return reply.code(400).send({ error: 'admin operations unavailable' });
+    const spaceId = await requireSpace(req, reply);
+    if (!spaceId) return;
 
     const id = randomUUID();
     const client = new TelegramClient(new StringSession(''), env.TELEGRAM_API_ID, env.TELEGRAM_API_HASH, {
@@ -121,6 +153,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       phase: 'starting',
       client,
       createdAt: Date.now(),
+      spaceId,
     };
     logins.set(id, pending);
 
@@ -145,8 +178,13 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       })
       .then(async () => {
         const me = await client.getMe();
+        if (await admin.findTelegramIdentity('user', me.id.toString())) {
+          await client.disconnect();
+          throw new Error(IDENTITY_TAKEN);
+        }
         const session = (client.session as StringSession).save();
         const accountId = await admin.insertAccount({
+          spaceId,
           kind: 'user',
           label: body.label,
           phone: body.phone,
@@ -172,17 +210,22 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   });
 
   app.get('/login/:id', async (req, reply) => {
+    const spaceId = await requireSpace(req, reply);
+    if (!spaceId) return;
     const { id } = z.object({ id: z.string() }).parse(req.params);
     const pending = logins.get(id);
-    if (!pending) return reply.code(404).send({ error: 'unknown login' });
+    if (!pending || pending.spaceId !== spaceId) return reply.code(404).send({ error: 'unknown login' });
     return { phase: pending.phase, error: pending.error, accountId: pending.accountId };
   });
 
   app.post('/login/:id/code', async (req, reply) => {
+    const spaceId = await requireSpace(req, reply);
+    if (!spaceId) return;
     const { id } = z.object({ id: z.string() }).parse(req.params);
     const { code } = z.object({ code: z.string().min(3).max(10) }).parse(req.body);
     const pending = logins.get(id);
-    if (!pending?.codeResolve) return reply.code(409).send({ error: 'not waiting for a code' });
+    if (!pending || pending.spaceId !== spaceId) return reply.code(404).send({ error: 'unknown login' });
+    if (!pending.codeResolve) return reply.code(409).send({ error: 'not waiting for a code' });
     pending.phase = 'starting';
     pending.codeResolve(code);
     pending.codeResolve = undefined;
@@ -190,10 +233,13 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   });
 
   app.post('/login/:id/password', async (req, reply) => {
+    const spaceId = await requireSpace(req, reply);
+    if (!spaceId) return;
     const { id } = z.object({ id: z.string() }).parse(req.params);
     const { password } = z.object({ password: z.string().min(1) }).parse(req.body);
     const pending = logins.get(id);
-    if (!pending?.passwordResolve) return reply.code(409).send({ error: 'not waiting for a password' });
+    if (!pending || pending.spaceId !== spaceId) return reply.code(404).send({ error: 'unknown login' });
+    if (!pending.passwordResolve) return reply.code(409).send({ error: 'not waiting for a password' });
     pending.phase = 'starting';
     pending.passwordResolve(password);
     pending.passwordResolve = undefined;
@@ -211,6 +257,8 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       })
       .parse(req.body);
     if (!admin) return reply.code(400).send({ error: 'admin operations unavailable' });
+    const spaceId = await requireSpace(req, reply);
+    if (!spaceId) return;
 
     const probe = new Bot(body.token);
     try {
@@ -218,15 +266,20 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     } catch {
       return reply.code(400).send({ error: 'Telegram rejected this bot token' });
     }
-    // Two connections polling one bot steal each other's updates.
-    const botId = String(probe.botInfo.id);
-    if (engine.config.accounts.some((a) => a.kind === 'bot' && a.tgId === botId)) {
-      return reply
-        .code(409)
-        .send({ error: `@${probe.botInfo.username} is already connected — add a different bot to share the load` });
+    // One bot serves one space: two relays polling it would steal each
+    // other's updates, and it must never carry two clients' traffic.
+    const existing = await admin.findTelegramIdentity('bot', String(probe.botInfo.id));
+    if (existing) {
+      return reply.code(409).send({
+        error:
+          existing.spaceId === spaceId
+            ? `@${probe.botInfo.username} is already connected here — add a different bot to share the load`
+            : IDENTITY_TAKEN,
+      });
     }
 
     const accountId = await admin.insertAccount({
+      spaceId,
       kind: 'bot',
       label: body.label,
       username: probe.botInfo.username,
@@ -242,12 +295,12 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
 
   // ── channels ──────────────────────────────────────────────────────────────
 
-  const pickResolver = (preferAccountId?: string): Transport | undefined => {
-    if (preferAccountId) {
+  const pickResolver = (spaceId: string, preferAccountId?: string): Transport | undefined => {
+    const accounts = engine.config.accounts.filter((a) => a.spaceId === spaceId);
+    if (preferAccountId && accounts.some((a) => a.id === preferAccountId)) {
       const t = engine.transport(preferAccountId);
       if (t) return t;
     }
-    const accounts = engine.config.accounts;
     const user = accounts.find((a) => a.kind === 'user' && a.status === 'connected');
     if (user) {
       const t = engine.transport(user.id);
@@ -266,8 +319,13 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       .object({ channelId: z.string().uuid(), ref: z.string().min(2), accountId: z.string().uuid().optional() })
       .parse(req.body);
     if (!admin) return reply.code(400).send({ error: 'admin operations unavailable' });
+    const spaceId = await requireSpace(req, reply);
+    if (!spaceId) return;
+    if ((await admin.spaceOf('channels', body.channelId)) !== spaceId) {
+      return reply.code(404).send({ error: 'channel not found' });
+    }
 
-    const resolver = pickResolver(body.accountId);
+    const resolver = pickResolver(spaceId, body.accountId);
     if (!resolver) return reply.code(409).send({ error: 'no connected Telegram account can resolve channels yet' });
 
     try {
@@ -297,8 +355,13 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       .object({ channelId: z.string().uuid(), ref: z.string().min(2), accountId: z.string().uuid().optional() })
       .parse(req.body);
     if (!admin) return reply.code(400).send({ error: 'admin operations unavailable' });
+    const spaceId = await requireSpace(req, reply);
+    if (!spaceId) return;
+    if ((await admin.spaceOf('channels', body.channelId)) !== spaceId) {
+      return reply.code(404).send({ error: 'channel not found' });
+    }
 
-    const joiner = pickResolver(body.accountId);
+    const joiner = pickResolver(spaceId, body.accountId);
     if (!joiner) return reply.code(409).send({ error: 'no connected account available' });
 
     try {
@@ -325,15 +388,22 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
 
   // ── queue actions & alerts ────────────────────────────────────────────────
 
-  app.post('/forwards/retry', async (req) => {
+  app.post('/forwards/retry', async (req, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(req.body);
+    const spaceId = await requireSpace(req, reply);
+    if (!spaceId) return;
+    if (admin && (await admin.spaceOf('forwards', id)) !== spaceId) {
+      return reply.code(404).send({ error: 'forward not found' });
+    }
     await store.updateForward(id, { state: 'queued', deliverAt: new Date(), attempts: 0 });
     return { ok: true };
   });
 
-  app.post('/alerts/test', async () => {
-    await store.notify('test', 'Test alert', 'If you can read this, alert delivery works.');
-    await dispatcher.dispatch('test', 'Test alert', 'If you can read this, alert delivery works.');
+  app.post('/alerts/test', async (req, reply) => {
+    const spaceId = await requireSpace(req, reply);
+    if (!spaceId) return;
+    // notify() also hands the alert to this space's dispatcher
+    await store.notify('test', 'Test alert', 'If you can read this, alert delivery works.', undefined, spaceId);
     return { ok: true };
   });
 

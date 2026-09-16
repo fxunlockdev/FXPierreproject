@@ -5,7 +5,7 @@ import {
   type RelayMessage,
   type RichText,
 } from '@pierre/core';
-import type { Channel, ForwardRecord, NewForward, RelayConfig, Route } from './model';
+import type { Account, Channel, ForwardRecord, NewForward, RelayConfig, Route } from './model';
 import type { Store } from './store/store';
 import {
   TransportError,
@@ -13,6 +13,9 @@ import {
   type ReaderHandlers,
   type Transport,
 } from './transport/transport';
+
+/** Rows with no space (single-tenant fixtures, the simulator) share the '' space. */
+const spaceOf = (row: { spaceId?: string }): string => row.spaceId ?? '';
 
 export interface ForwardPayload {
   srcText: RichText;
@@ -64,7 +67,9 @@ const BOT_MSGS_PER_SECOND = 25;
  */
 export class RelayEngine {
   private cfg: RelayConfig = { accounts: [], channels: [], memberships: [], routes: [] };
-  private mastersByTgId = new Map<string, Channel>();
+  /** space → tg chat id → master channel */
+  private mastersBySpace = new Map<string, Map<string, Channel>>();
+  private accountsById = new Map<string, Account>();
   private channelsById = new Map<string, Channel>();
   private routesByMaster = new Map<string, Route[]>();
   private routesById = new Map<string, Route>();
@@ -93,16 +98,31 @@ export class RelayEngine {
 
   readonly handlers: ReaderHandlers = {
     onPost: (accountId, msg) => this.ingest({ ...msg, readerAccountId: msg.readerAccountId ?? accountId }),
-    onEdit: (_accountId, msg) => this.inOrder(msg.chatId, () => this.handleEdit(msg)),
-    onDelete: (_accountId, chatId, ids) => this.inOrder(chatId, () => this.handleDelete(chatId, ids)),
+    onEdit: async (accountId, msg) => {
+      await Promise.all(
+        this.spacesForReader(accountId, msg.chatId).map((space) =>
+          this.inOrder(`${space}:${msg.chatId}`, () => this.handleEdit(space, msg)),
+        ),
+      );
+    },
+    onDelete: async (accountId, chatId, ids) => {
+      await Promise.all(
+        this.spacesForReader(accountId, chatId).map((space) =>
+          this.inOrder(`${space}:${chatId}`, () => this.handleDelete(space, chatId, ids)),
+        ),
+      );
+    },
     onChatSeen: (accountId, chat) =>
       this.store
         .upsertDiscoveredChat(accountId, chat)
         .catch((err) => console.error('[engine] could not record discovered chat:', err)),
-    onTopicSeen: (chatId, topicId, title) =>
-      this.store
-        .noteForumTopic(chatId, topicId, title)
-        .catch((err) => console.error('[engine] could not record forum topic:', err)),
+    onTopicSeen: async (accountId, chatId, topicId, title) => {
+      const account = this.accountsById.get(accountId);
+      if (!account) return; // topics are recorded for the space of the bot that saw them
+      await this.store
+        .noteForumTopic(spaceOf(account), chatId, topicId, title)
+        .catch((err) => console.error('[engine] could not record forum topic:', err));
+    },
     onChatMigrated: async (oldChatId, newChatId) => {
       try {
         await this.store.migrateChatId(oldChatId, newChatId);
@@ -142,13 +162,19 @@ export class RelayEngine {
 
   async reload(): Promise<void> {
     this.cfg = await this.store.loadConfig();
-    this.mastersByTgId.clear();
+    this.mastersBySpace.clear();
+    this.accountsById.clear();
     this.channelsById.clear();
     this.routesByMaster.clear();
     this.routesById.clear();
+    for (const a of this.cfg.accounts) this.accountsById.set(a.id, a);
     for (const ch of this.cfg.channels) {
       this.channelsById.set(ch.id, ch);
-      if (ch.role === 'master' && ch.tgChatId) this.mastersByTgId.set(ch.tgChatId, ch);
+      if (ch.role === 'master' && ch.tgChatId) {
+        const masters = this.mastersBySpace.get(spaceOf(ch)) ?? new Map<string, Channel>();
+        masters.set(ch.tgChatId, ch);
+        this.mastersBySpace.set(spaceOf(ch), masters);
+      }
     }
     for (const r of this.cfg.routes) {
       this.routesById.set(r.id, r);
@@ -170,21 +196,44 @@ export class RelayEngine {
 
   // ── ingest ────────────────────────────────────────────────────────────────
 
+  /**
+   * The spaces a message feeds: only the space of the account that received
+   * it — a client's bot never feeds another client's routes, even when both
+   * relay the same channel. The simulator (tests/demo) feeds every space.
+   */
+  private spacesForReader(accountId: string | undefined, chatId: string): string[] {
+    const transport = accountId ? this.transports.get(accountId) : undefined;
+    const account = accountId ? this.accountsById.get(accountId) : undefined;
+    if (account && transport?.kind !== 'sim') return [spaceOf(account)];
+    if (!accountId || transport?.kind === 'sim') {
+      return [...this.mastersBySpace.entries()].filter(([, m]) => m.has(chatId)).map(([space]) => space);
+    }
+    return []; // a bot of a disabled or removed space
+  }
+
   async ingest(msg: RelayMessage): Promise<void> {
-    const key = `${msg.chatId}:${msg.messageId}`;
+    await Promise.all(
+      this.spacesForReader(msg.readerAccountId, msg.chatId).map((space) => this.ingestFor(space, msg)),
+    );
+  }
+
+  private async ingestFor(space: string, msg: RelayMessage): Promise<void> {
+    // two bots of the same space in one chat both report the post: once per space
+    const key = `${space}:${msg.chatId}:${msg.messageId}`;
     if (this.seen.has(key)) return;
     this.remember(key);
     // our own delivery surfacing in a chat that is also a master (A → B → A)
-    if (this.sentByUs.has(key)) return;
+    if (this.sentByUs.has(`${msg.chatId}:${msg.messageId}`)) return;
 
+    const chain = `${space}:${msg.chatId}`;
     if (msg.albumKey) {
-      const bufKey = `${msg.chatId}:${msg.albumKey}`;
+      const bufKey = `${space}:${msg.chatId}:${msg.albumKey}`;
       const flush = (): void => {
         const group = this.albumBuffer.get(bufKey);
         this.albumBuffer.delete(bufKey);
         if (group) {
           const ordered = group.msgs.sort((a, b) => a.messageId - b.messageId);
-          void this.inOrder(msg.chatId, () => this.processGroup(ordered));
+          void this.inOrder(chain, () => this.processGroup(space, ordered));
         }
       };
       const existing = this.albumBuffer.get(bufKey);
@@ -202,7 +251,7 @@ export class RelayEngine {
       return;
     }
 
-    await this.inOrder(msg.chatId, () => this.processGroup([msg]));
+    await this.inOrder(chain, () => this.processGroup(space, [msg]));
   }
 
   /** Does this post belong to the forum topic the route listens to? */
@@ -262,10 +311,10 @@ export class RelayEngine {
     };
   }
 
-  private async processGroup(msgs: RelayMessage[]): Promise<void> {
+  private async processGroup(space: string, msgs: RelayMessage[]): Promise<void> {
     const first = msgs[0];
     if (!first) return;
-    const master = this.mastersByTgId.get(first.chatId);
+    const master = this.mastersBySpace.get(space)?.get(first.chatId);
     if (!master || !master.enabled) return;
 
     this.touchMaster(master.id);
@@ -407,8 +456,8 @@ export class RelayEngine {
 
   // ── edits & deletes ───────────────────────────────────────────────────────
 
-  async handleEdit(msg: RelayMessage): Promise<void> {
-    const master = this.mastersByTgId.get(msg.chatId);
+  async handleEdit(space: string, msg: RelayMessage): Promise<void> {
+    const master = this.mastersBySpace.get(space)?.get(msg.chatId);
     if (!master || !master.enabled) return;
     const now = this.opts.clock();
 
@@ -472,8 +521,8 @@ export class RelayEngine {
     }
   }
 
-  async handleDelete(chatId: string, messageIds: number[]): Promise<void> {
-    const master = this.mastersByTgId.get(chatId);
+  async handleDelete(space: string, chatId: string, messageIds: number[]): Promise<void> {
+    const master = this.mastersBySpace.get(space)?.get(chatId);
     if (!master) return;
     const now = this.opts.clock();
 
@@ -515,17 +564,24 @@ export class RelayEngine {
   // ── catch-up after downtime ───────────────────────────────────────────────
 
   async catchUp(): Promise<void> {
-    const { catchupWindowMinutes } = await this.store.getAppSettings();
-    if (catchupWindowMinutes <= 0) return;
-    const since = Math.floor(this.opts.clock().getTime() / 1000) - catchupWindowMinutes * 60;
-
+    const windowBySpace = new Map<string, number>();
     for (const master of this.cfg.channels) {
       if (master.role !== 'master' || !master.enabled || !master.tgChatId) continue;
+      const space = spaceOf(master);
+      if (!windowBySpace.has(space)) {
+        const settings = await this.store.getAppSettings(space).catch(() => null);
+        windowBySpace.set(space, settings?.catchupWindowMinutes ?? 0);
+      }
+      const minutes = windowBySpace.get(space)!;
+      if (minutes <= 0) continue;
+      const since = Math.floor(this.opts.clock().getTime() / 1000) - minutes * 60;
+
       const reader = this.pickReader(master);
       if (!reader) continue;
       try {
         const missed = await reader.history(master.tgChatId, since);
-        for (const msg of missed) await this.ingest(msg);
+        // feed only the space this master (and its reader) belongs to
+        for (const msg of missed) await this.ingestFor(space, { ...msg, readerAccountId: reader.accountId });
       } catch {
         // history is best-effort; live updates keep flowing regardless
       }
@@ -559,12 +615,14 @@ export class RelayEngine {
         new Date(now.getTime() - this.opts.staleSendingSeconds * 1000),
         'delivery unconfirmed — the worker was interrupted mid-send; check the receiver channel before retrying',
       );
-      if (parked > 0) {
-        console.warn(`[engine] parked ${parked} unconfirmed forward(s) stuck in sending`);
+      for (const { spaceId, count } of parked) {
+        console.warn(`[engine] parked ${count} unconfirmed forward(s) stuck in sending`);
         await this.store.notify(
           'worker',
           'Unconfirmed deliveries',
-          `${parked} forward(s) were interrupted mid-send and parked as failed. Check the receiver channel before retrying them.`,
+          `${count} forward(s) were interrupted mid-send and parked as failed. Check the receiver channel before retrying them.`,
+          undefined,
+          spaceId,
         );
       }
     } catch (err) {
@@ -572,22 +630,14 @@ export class RelayEngine {
     }
   }
 
+  /** A connected reader of the master's own space — preferring one that is in the chat. */
   private pickReader(master: Channel): Transport | undefined {
-    const memberIds = this.cfg.memberships
-      .filter((m) => m.channelId === master.id && m.isMember)
-      .map((m) => m.accountId);
-    for (const id of memberIds) {
-      const acc = this.cfg.accounts.find((a) => a.id === id);
-      const t = this.transports.get(id);
-      if (t && acc?.isReader && acc.status === 'connected') return t;
-    }
-    // fallback: any connected reader, then the simulator
-    for (const acc of this.cfg.accounts) {
-      if (acc.isReader && acc.status === 'connected') {
-        const t = this.transports.get(acc.id);
-        if (t) return t;
-      }
-    }
+    const space = spaceOf(master);
+    const readers = this.cfg.accounts.filter(
+      (a) => spaceOf(a) === space && a.isReader && a.status === 'connected' && this.transports.has(a.id),
+    );
+    const chosen = readers.find((a) => this.canAccess(a.id, master)) ?? readers[0];
+    if (chosen) return this.transports.get(chosen.id);
     return [...this.transports.values()].find((t) => t.kind === 'sim');
   }
 
@@ -620,17 +670,20 @@ export class RelayEngine {
     master: Channel,
     opts: { needsSourceAccess: boolean; stickyAccountId?: string; fileAccountId?: string },
   ): Transport | undefined {
+    const space = spaceOf(route);
     const connected = (id: string | null | undefined): Transport | undefined => {
       if (!id) return undefined;
-      const account = this.cfg.accounts.find((a) => a.id === id);
-      if (account && account.status !== 'connected') return undefined;
-      return this.transports.get(id);
+      const account = this.accountsById.get(id);
+      const transport = this.transports.get(id);
+      if (!account) return transport?.kind === 'sim' ? transport : undefined;
+      if (account.status !== 'connected' || spaceOf(account) !== space) return undefined;
+      return transport;
     };
     const pinned = connected(route.senderAccountId) ?? connected(opts.stickyAccountId);
     if (pinned) return pinned;
 
     const eligible = this.cfg.accounts
-      .filter((a) => a.isSender && a.status === 'connected' && this.transports.has(a.id))
+      .filter((a) => spaceOf(a) === space && a.isSender && a.status === 'connected' && this.transports.has(a.id))
       .filter((a) => this.canPostTo(a.id, receiver))
       .filter((a) => !opts.needsSourceAccess || this.canAccess(a.id, master))
       .map((a) => this.transports.get(a.id)!);
@@ -650,9 +703,9 @@ export class RelayEngine {
       return ranked[0]!.t;
     }
 
-    // No rights known yet (e.g. just connected): any connected sender, then the simulator.
+    // No rights known yet (e.g. just connected): any connected sender OF THIS SPACE, then the simulator.
     for (const acc of this.cfg.accounts) {
-      if (acc.isSender && acc.status === 'connected') {
+      if (spaceOf(acc) === space && acc.isSender && acc.status === 'connected') {
         const t = this.transports.get(acc.id);
         if (t) return t;
       }

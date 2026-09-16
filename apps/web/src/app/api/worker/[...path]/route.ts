@@ -3,11 +3,14 @@ import { supabaseServer } from "@/lib/supabase/server";
 
 /**
  * Authenticated proxy to the relay worker's admin API.
- * Only dashboard admins may pass; the worker token never reaches the browser.
+ * Every call runs inside one space: the caller must be an owner/admin of the
+ * space named in x-space-id. The worker token never reaches the browser.
  */
 
+const SPACE_HEADER = "x-space-id";
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const ALLOWED = [
-  /^health$/,
   /^login\/start$/,
   /^login\/[0-9a-f-]{36}$/,
   /^login\/[0-9a-f-]{36}\/(code|password)$/,
@@ -15,7 +18,6 @@ const ALLOWED = [
   /^channels\/(resolve|join)$/,
   /^forwards\/retry$/,
   /^alerts\/test$/,
-  /^sim\/(post|edit|delete|fail)$/,
 ];
 
 async function proxy(req: NextRequest, path: string[]): Promise<NextResponse> {
@@ -24,20 +26,21 @@ async function proxy(req: NextRequest, path: string[]): Promise<NextResponse> {
     return NextResponse.json({ error: "path not allowed" }, { status: 404 });
   }
 
+  const spaceId = req.headers.get(SPACE_HEADER) ?? "";
+  if (!UUID.test(spaceId)) {
+    return NextResponse.json({ error: "missing space" }, { status: 400 });
+  }
+
   const supabase = await supabaseServer();
   const {
     data: { user },
   } = await supabase.auth.getUser();
-  if (!user?.email) {
+  if (!user) {
     return NextResponse.json({ error: "not signed in" }, { status: 401 });
   }
-  const { data: member } = await supabase
-    .from("app_members")
-    .select("role")
-    .eq("email", user.email.toLowerCase())
-    .maybeSingle();
-  if (member?.role !== "admin") {
-    return NextResponse.json({ error: "admin access required" }, { status: 403 });
+  const { data: isAdmin, error } = await supabase.rpc("is_space_admin", { p_space: spaceId });
+  if (error || isAdmin !== true) {
+    return NextResponse.json({ error: "admin access to this space is required" }, { status: 403 });
   }
 
   const workerUrl = process.env.WORKER_URL;
@@ -56,6 +59,7 @@ async function proxy(req: NextRequest, path: string[]): Promise<NextResponse> {
       headers: {
         authorization: `Bearer ${workerToken}`,
         "content-type": "application/json",
+        [SPACE_HEADER]: spaceId.toLowerCase(),
       },
       body: req.method === "POST" ? await req.text() : undefined,
       signal: AbortSignal.timeout(30_000),

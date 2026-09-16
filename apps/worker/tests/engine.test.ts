@@ -738,8 +738,8 @@ describe('RelayEngine — forum topics', () => {
   });
 
   it('records topics a reader reports, never erasing a known name', async () => {
-    await engine.handlers.onTopicSeen?.(MASTER_TG, 5, 'Gold');
-    await engine.handlers.onTopicSeen?.(MASTER_TG, 5, '');
+    await engine.handlers.onTopicSeen?.('acc-sim', MASTER_TG, 5, 'Gold');
+    await engine.handlers.onTopicSeen?.('acc-sim', MASTER_TG, 5, '');
     expect(store.topics.get(`${MASTER_TG}:5`)).toBe('Gold');
   });
 });
@@ -825,5 +825,109 @@ describe('RelayEngine — several bots share the sending load', () => {
 
     expect(b.sent.map((s) => s.text.text)).toEqual(['text 2']);
     expect(a.sent.map((s) => s.text.text)).toEqual(['text 1', 'chart']);
+  });
+});
+
+describe('RelayEngine — private spaces never mix', () => {
+  const MASTER = '-100777'; // the same public channel, relayed by two clients
+  const RX_A = '-100881';
+  const RX_B = '-100882';
+
+  const botIn = (id: string, spaceId: string) => ({
+    id, spaceId, kind: 'bot' as const, label: id, status: 'connected' as const,
+    isReader: true, isSender: true, isAlertSender: false, maxMsgsPerMinute: 20,
+  });
+  const channel = (id: string, spaceId: string, role: 'master' | 'receiver', tgChatId: string) => ({
+    id, spaceId, role, tgChatId, title: id, enabled: true, health: 'ok' as const, isProtected: false,
+  });
+  const realBot = (accountId: string): SimTransport => {
+    const s = new SimTransport(accountId);
+    Object.defineProperty(s, 'kind', { value: 'bot' });
+    return s;
+  };
+
+  async function twoClients(opts: { bHasBot: boolean }) {
+    nowMs = new Date('2026-09-15T10:00:00Z').getTime();
+    store = new MemoryStore();
+    store.config = {
+      accounts: [botIn('bot-a', 'space-a'), ...(opts.bHasBot ? [botIn('bot-b', 'space-b')] : [])],
+      channels: [
+        channel('m-a', 'space-a', 'master', MASTER),
+        channel('r-a', 'space-a', 'receiver', RX_A),
+        channel('m-b', 'space-b', 'master', MASTER),
+        channel('r-b', 'space-b', 'receiver', RX_B),
+      ],
+      memberships: [],
+      routes: [
+        baseRoute({ id: 'route-a', spaceId: 'space-a', masterId: 'm-a', receiverId: 'r-a' }),
+        baseRoute({ id: 'route-b', spaceId: 'space-b', masterId: 'm-b', receiverId: 'r-b' }),
+      ],
+      chatAccess: [
+        { accountId: 'bot-a', tgChatId: MASTER, canRead: true, canPost: true },
+        { accountId: 'bot-a', tgChatId: RX_A, canRead: true, canPost: true },
+        // bot-a is ALSO admin in client B's receiver — it must still never post there
+        { accountId: 'bot-a', tgChatId: RX_B, canRead: true, canPost: true },
+        ...(opts.bHasBot
+          ? [
+              { accountId: 'bot-b', tgChatId: MASTER, canRead: true, canPost: true },
+              { accountId: 'bot-b', tgChatId: RX_B, canRead: true, canPost: true },
+            ]
+          : []),
+      ],
+    };
+    const a = realBot('bot-a');
+    const b = realBot('bot-b');
+    engine = new RelayEngine(store, { albumWaitMs: 15, clock, immediateDelivery: true });
+    engine.registerTransport(a);
+    if (opts.bHasBot) engine.registerTransport(b);
+    await engine.init();
+    await a.start(engine.handlers);
+    if (opts.bHasBot) await b.start(engine.handlers);
+    return { a, b };
+  }
+
+  it("client A's bot feeds only client A's routes, even on a channel both relay", async () => {
+    const { a } = await twoClients({ bHasBot: false });
+    await a.injectPost(MASTER, 'signal', { messageId: 1 });
+    await drain();
+
+    expect(a.sent.map((s) => s.toChatId)).toEqual([RX_A]);
+    expect([...store.forwards.values()].map((f) => f.routeId)).toEqual(['route-a']); // B untouched
+  });
+
+  it("each client's own bot delivers that client's copy", async () => {
+    const { a, b } = await twoClients({ bHasBot: true });
+    await a.injectPost(MASTER, 'signal', { messageId: 1 }); // both bots see the same post
+    await b.injectPost(MASTER, 'signal', { messageId: 1 });
+    await drain();
+
+    expect(a.sent.map((s) => s.toChatId)).toEqual([RX_A]);
+    expect(b.sent.map((s) => s.toChatId)).toEqual([RX_B]);
+  });
+
+  it("a client without a working bot is never served by another client's bot", async () => {
+    const { a } = await twoClients({ bHasBot: false });
+    // force a delivery attempt on client B's route
+    await store.upsertForward({
+      routeId: 'route-b', masterChannelId: 'm-b', receiverChannelId: 'r-b',
+      srcMessageId: 5, kind: 'post', state: 'queued', deliverAt: new Date(nowMs), mediaKind: 'text',
+      payload: { srcText: { text: 'x', entities: [] }, output: { text: 'x', entities: [] }, removeButtons: false },
+    });
+    await drain();
+
+    expect(a.sent.some((s) => s.toChatId === RX_B)).toBe(false);
+    const row = [...store.forwards.values()].find((f) => f.routeId === 'route-b')!;
+    expect(row.state).toBe('failed');
+    expect(row.lastError).toContain('no connected sender');
+  });
+
+  it('a bot of an unknown (removed or disabled) space feeds nothing', async () => {
+    await twoClients({ bHasBot: false });
+    const orphan = realBot('bot-removed');
+    engine.registerTransport(orphan);
+    await orphan.start(engine.handlers);
+    await orphan.injectPost(MASTER, 'should go nowhere', { messageId: 9 });
+    await drain();
+    expect(store.forwards.size).toBe(0);
   });
 });

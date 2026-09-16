@@ -54,9 +54,12 @@ export async function assertPublicWebhookUrl(raw: string): Promise<void> {
 }
 
 export interface AlertDeps {
-  getSettings(): Promise<AlertSettings>;
-  /** Send a Telegram message via the alert bot; target is @username or chat id. */
-  sendTelegram(target: string, text: string): Promise<void>;
+  getSettings(spaceId: string): Promise<AlertSettings>;
+  /**
+   * Send a Telegram message through a bot OF THIS SPACE; target is @username
+   * or chat id. A client's alerts never go out through another client's bot.
+   */
+  sendTelegram(spaceId: string, target: string, text: string): Promise<void>;
 }
 
 /**
@@ -65,24 +68,23 @@ export interface AlertDeps {
  */
 export class AlertDispatcher {
   private lastSent = new Map<string, number>();
-  private cachedSettings: { value: AlertSettings; at: number } | null = null;
+  private cachedSettings = new Map<string, { value: AlertSettings; at: number }>();
 
   constructor(private deps: AlertDeps) {}
 
-  private async settings(): Promise<AlertSettings> {
+  private async settings(spaceId: string): Promise<AlertSettings> {
     const now = Date.now();
-    if (this.cachedSettings && now - this.cachedSettings.at < 30_000) {
-      return this.cachedSettings.value;
-    }
-    const value = await this.deps.getSettings();
-    this.cachedSettings = { value, at: now };
+    const cached = this.cachedSettings.get(spaceId);
+    if (cached && now - cached.at < 30_000) return cached.value;
+    const value = await this.deps.getSettings(spaceId);
+    this.cachedSettings.set(spaceId, { value, at: now });
     return value;
   }
 
-  async dispatch(kind: string, title: string, body: string): Promise<void> {
+  async dispatch(kind: string, title: string, body: string, spaceId: string): Promise<void> {
     let s: AlertSettings;
     try {
-      s = await this.settings();
+      s = await this.settings(spaceId);
     } catch {
       return; // no settings — nothing to send
     }
@@ -90,7 +92,7 @@ export class AlertDispatcher {
     if (s.triggers[kind] === false) return;
 
     const cooldownMs = s.cooldownMinutes * 60_000;
-    const key = `${kind}:${title}`;
+    const key = `${spaceId}:${kind}:${title}`;
     const last = this.lastSent.get(key) ?? 0;
     if (cooldownMs > 0 && Date.now() - last < cooldownMs) return;
     this.lastSent.set(key, Date.now());
@@ -99,7 +101,7 @@ export class AlertDispatcher {
 
     if (s.telegramEnabled && s.telegramTarget) {
       try {
-        await this.deps.sendTelegram(s.telegramTarget, text);
+        await this.deps.sendTelegram(spaceId, s.telegramTarget, text);
       } catch (err) {
         console.error('[alerts] telegram delivery failed:', err);
       }

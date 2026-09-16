@@ -1,21 +1,18 @@
 "use client";
 
 import { useState, useSyncExternalStore } from "react";
+import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { Moon, Sun, UserPlus } from "@phosphor-icons/react";
+import { Moon, Sun } from "@phosphor-icons/react";
+import { JoinSpaceForm } from "@/components/shell/join-space-form";
 import { SectionHeader, Skeleton } from "@/components/ui/bits";
 import { Button } from "@/components/ui/button";
 import { Field, Input } from "@/components/ui/field";
-import { Select } from "@/components/ui/select";
 import { timeAgo } from "@/lib/format";
 import { isLightTheme, serverIsLightTheme, subscribeTheme, toggleTheme } from "@/lib/theme";
-import {
-  useAddMember,
-  useAppSettings,
-  useAudit,
-  useMembers,
-  useUpdateAppSettings,
-} from "@/lib/queries";
+import { useAppSettings, useAudit, useRenameSpace, useUpdateAppSettings } from "@/lib/queries";
+import { useSpace } from "@/lib/space";
+import { Team } from "./team";
 
 function ThemeToggle() {
   const light = useSyncExternalStore(subscribeTheme, isLightTheme, serverIsLightTheme);
@@ -31,13 +28,14 @@ function ThemeToggle() {
 function RelaySettings() {
   const { data: settings, isLoading } = useAppSettings();
   if (isLoading || !settings) return <Skeleton className="h-32" />;
-  return <RelayForm settings={settings} />;
+  return <RelayForm key={settings.space_id} settings={settings} />;
 }
 
 type AppSettingsRow = NonNullable<ReturnType<typeof useAppSettings>["data"]>;
 
 function RelayForm({ settings }: { settings: AppSettingsRow }) {
   const update = useUpdateAppSettings();
+  const { canEdit } = useSpace();
   // Seeded from the server row once — refetches must not stomp in-progress edits.
   const [retention, setRetention] = useState(settings.retention_days);
   const [catchup, setCatchup] = useState(settings.catchup_window_minutes);
@@ -59,6 +57,7 @@ function RelayForm({ settings }: { settings: AppSettingsRow }) {
             type="number"
             min={1}
             max={365}
+            disabled={!canEdit}
             value={retention}
             onChange={(e) => setRetention(Number(e.target.value))}
           />
@@ -71,81 +70,61 @@ function RelayForm({ settings }: { settings: AppSettingsRow }) {
             type="number"
             min={0}
             max={1440}
+            disabled={!canEdit}
             value={catchup}
             onChange={(e) => setCatchup(Number(e.target.value))}
           />
         </Field>
       </div>
-      <div className="flex justify-end">
-        <Button type="submit" variant="primary" loading={update.isPending}>
-          Save
-        </Button>
-      </div>
+      {canEdit && (
+        <div className="flex justify-end">
+          <Button type="submit" variant="primary" loading={update.isPending}>
+            Save
+          </Button>
+        </div>
+      )}
     </form>
   );
 }
 
-function Team() {
-  const { data: members, isLoading } = useMembers();
-  const add = useAddMember();
-  const [email, setEmail] = useState("");
-  const [role, setRole] = useState("viewer");
-
-  if (isLoading) return <Skeleton className="h-32" />;
+function SpaceDetails() {
+  const router = useRouter();
+  const { space, canEdit } = useSpace();
+  const rename = useRenameSpace();
+  const [name, setName] = useState(space.name);
 
   return (
-    <div className="flex flex-col gap-4">
-      <ul className="divide-y divide-edge border-y border-edge">
-        {(members ?? []).map((m) => (
-          <li key={m.id} className="flex items-center gap-3 py-2.5">
-            <span className="flex size-7 items-center justify-center rounded-full bg-raised font-mono text-[11px] font-semibold uppercase text-mute">
-              {m.email.slice(0, 2)}
-            </span>
-            <span className="min-w-0 flex-1 truncate text-[13.5px]">{m.email}</span>
-            <span className="font-mono text-[11px] uppercase tracking-wider text-faint">{m.role}</span>
-            <span className={`size-1.5 rounded-full ${m.user_id ? "bg-live" : "bg-faint"}`} title={m.user_id ? "activated" : "invited, not signed in yet"} />
-          </li>
-        ))}
-      </ul>
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          add.mutate(
-            { email, role },
-            {
-              onSuccess: () => {
-                toast.success(`Invited ${email} — they can now activate their account on the login page`);
-                setEmail("");
-              },
-            },
-          );
-        }}
-        className="flex flex-wrap items-end gap-2"
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        rename.mutate(name, {
+          onSuccess: () => {
+            toast.success("Space renamed");
+            router.refresh();
+          },
+        });
+      }}
+      className="flex flex-wrap items-end gap-2"
+    >
+      <Field
+        label="Space name"
+        hint="Everything in this space — bots, channels, routes and logs — is private to its members."
+        className="min-w-56 flex-1"
       >
-        <Field label="Invite by email" className="min-w-56 flex-1">
-          <Input
-            required
-            type="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            placeholder="teammate@company.com"
-          />
-        </Field>
-        <Select
-          aria-label="New member role"
-          value={role}
-          onValueChange={setRole}
-          options={[
-            { value: "viewer", label: "Viewer — read-only" },
-            { value: "admin", label: "Admin — full control" },
-          ]}
-          className="w-44"
+        <Input
+          required
+          maxLength={80}
+          disabled={!canEdit}
+          value={name}
+          onChange={(e) => setName(e.target.value)}
         />
-        <Button type="submit" variant="primary" loading={add.isPending}>
-          <UserPlus size={14} /> Invite
+      </Field>
+      {canEdit && (
+        <Button type="submit" variant="primary" loading={rename.isPending} disabled={name.trim() === space.name}>
+          Rename
         </Button>
-      </form>
-    </div>
+      )}
+    </form>
   );
 }
 
@@ -170,16 +149,32 @@ function AuditTrail() {
   );
 }
 
+function JoinAnother() {
+  const { switchSpace } = useSpace();
+  return <JoinSpaceForm compact onJoined={switchSpace} />;
+}
+
+/** Re-seed the forms when the user switches space. */
+function SpaceKeyed() {
+  const { space } = useSpace();
+  return <SpaceDetails key={`${space.id}:${space.name}`} />;
+}
+
 export default function SettingsPage() {
   return (
     <div className="flex flex-col gap-10">
       <header className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold tracking-tight">Settings</h1>
-          <p className="mt-0.5 text-[13px] text-mute">Relay behavior, team access, and the audit trail.</p>
+          <p className="mt-0.5 text-[13px] text-mute">Your space, relay behavior, team access, and the audit trail.</p>
         </div>
         <ThemeToggle />
       </header>
+
+      <section>
+        <SectionHeader title="Space" />
+        <SpaceKeyed />
+      </section>
 
       <section>
         <SectionHeader title="Relay" />
@@ -187,11 +182,18 @@ export default function SettingsPage() {
       </section>
 
       <section>
-        <SectionHeader
-          title="Team"
-          hint="Invite-only: people you add here can activate their account from the login page."
-        />
+        <SectionHeader title="Team" hint="Members of this space. Nobody outside it can see its data." />
         <Team />
+      </section>
+
+      <section>
+        <SectionHeader
+          title="Join another space"
+          hint="Got an invite code from someone else's space? Enter it to add that space to your switcher."
+        />
+        <div className="max-w-md">
+          <JoinAnother />
+        </div>
       </section>
 
       <section>

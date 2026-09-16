@@ -12,10 +12,13 @@ import {
   List,
   ListChecks,
   SignOut,
+  ShieldStar,
   SquaresFour,
   X,
 } from "@phosphor-icons/react";
-import { useIncidents, useWorkerStatus } from "@/lib/queries";
+import { Select } from "@/components/ui/select";
+import { useIncidents, usePendingCount, useRelayStatus } from "@/lib/queries";
+import { useSpace } from "@/lib/space";
 import { supabaseBrowser } from "@/lib/supabase/client";
 import { timeAgo } from "@/lib/format";
 import { useNow } from "@/lib/use-now";
@@ -31,11 +34,8 @@ const NAV = [
 ] as const;
 
 function WorkerPill() {
-  const { data: workers } = useWorkerStatus();
-  const latest = workers?.reduce(
-    (best, w) => (!best || w.heartbeat_at > best.heartbeat_at ? w : best),
-    undefined as (typeof workers extends (infer T)[] | undefined ? T : never) | undefined,
-  );
+  const { data: latest } = useRelayStatus();
+  const { data: pending } = usePendingCount();
 
   const now = useNow(15_000);
   const age = latest ? now - new Date(latest.heartbeat_at).getTime() : Infinity;
@@ -54,9 +54,37 @@ function WorkerPill() {
       <div className="min-w-0 flex-1">
         <p className="truncate text-[12px] font-medium text-ink">{label}</p>
         <p className="truncate font-mono text-[11px] text-faint">
-          {latest ? `queue ${latest.queue_depth} · beat ${timeAgo(latest.heartbeat_at)}` : "no heartbeat yet"}
+          {latest ? `queue ${pending ?? 0} · beat ${timeAgo(latest.heartbeat_at)}` : "no heartbeat yet"}
         </p>
       </div>
+    </div>
+  );
+}
+
+const ROLE_LABEL = { owner: "Owner", admin: "Admin", viewer: "Viewer" } as const;
+
+function SpaceSwitcher() {
+  const { space, spaces, switchSpace } = useSpace();
+  return (
+    <div className="flex flex-col gap-1.5 px-1">
+      <span className="px-1 text-[10.5px] font-medium uppercase tracking-[0.12em] text-faint">Space</span>
+      {spaces.length > 1 ? (
+        <Select
+          aria-label="Switch space"
+          value={space.id}
+          onValueChange={switchSpace}
+          options={spaces.map((s) => ({ value: s.id, label: s.name }))}
+          className="w-full"
+        />
+      ) : (
+        <p className="truncate rounded-lg border border-edge bg-raised px-3 py-2 text-[13px] font-medium text-ink" title={space.name}>
+          {space.name}
+        </p>
+      )}
+      <span className="px-1 text-[11px] text-faint">
+        {ROLE_LABEL[space.role]}
+        {space.role === "viewer" ? " · read-only" : ""}
+      </span>
     </div>
   );
 }
@@ -65,10 +93,12 @@ function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
   const pathname = usePathname();
   const { data: incidents } = useIncidents();
   const openCount = incidents?.filter((i) => i.status === "open").length ?? 0;
+  const { isPlatformAdmin } = useSpace();
+  const items = isPlatformAdmin ? [...NAV, { href: "/admin", label: "Admin", icon: ShieldStar }] : NAV;
 
   return (
     <nav aria-label="Main navigation" className="flex flex-1 flex-col gap-0.5">
-      {NAV.map(({ href, label, icon: Icon }) => {
+      {items.map(({ href, label, icon: Icon }) => {
         const active = pathname.startsWith(href);
         return (
           <Link
@@ -141,6 +171,7 @@ export function Sidebar({ email }: { email: string }) {
       {/* desktop */}
       <aside className="fixed inset-y-0 left-0 z-40 hidden w-60 flex-col gap-5 border-r border-edge bg-surface px-3 py-5 md:flex">
         <Brand />
+        <SpaceSwitcher />
         <NavLinks />
         <WorkerPill />
         <SignOutButton email={email} />
@@ -172,6 +203,7 @@ export function Sidebar({ email }: { email: string }) {
                 <X size={18} />
               </button>
             </div>
+            <SpaceSwitcher />
             <NavLinks onNavigate={() => setOpen(false)} />
             <WorkerPill />
             <SignOutButton email={email} />

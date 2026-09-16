@@ -37,7 +37,7 @@ export interface Store {
    * They are never requeued — the send may already have reached Telegram.
    * Returns how many rows were parked.
    */
-  parkStaleSending(before: Date, note: string): Promise<number>;
+  parkStaleSending(before: Date, note: string): Promise<{ spaceId: string; count: number }[]>;
   /**
    * Latest 'post' forward in ANY state for edit/delete sync — an edit that
    * arrives while the post is still queued must update it in place, and a
@@ -64,14 +64,15 @@ export interface Store {
     message: string,
   ): Promise<{ id: string; isNew: boolean }>;
   resolveIncidents(kind: IncidentKind, refs: IncidentRefs): Promise<void>;
-  notify(kind: string, title: string, body: string, incidentId?: string): Promise<void>;
+  /** In-app notification (+ alert). Space comes from the incident, or pass it. */
+  notify(kind: string, title: string, body: string, incidentId?: string, spaceId?: string): Promise<void>;
 
   /** Record a chat an account can see (pick-from-list in the dashboard). */
   upsertDiscoveredChat(accountId: string, chat: DiscoveredChat): Promise<void>;
   /** A basic group became a supergroup: repoint channels + discovery at the new id. */
   migrateChatId(oldChatId: string, newChatId: string): Promise<void>;
   /** Record a forum topic ('' title never overwrites a known name). */
-  noteForumTopic(chatId: string, topicId: number, title: string): Promise<void>;
+  noteForumTopic(spaceId: string, chatId: string, topicId: number, title: string): Promise<void>;
 
   setChannelHealth(channelId: string, health: ChannelHealth, error?: string): Promise<void>;
   setChannelLastMessage(channelId: string, at: Date): Promise<void>;
@@ -81,6 +82,6 @@ export interface Store {
   getSecret(accountId: string): Promise<string | null>;
   setSecret(accountId: string, secret: string): Promise<void>;
 
-  getAlertSettings(): Promise<AlertSettings>;
-  getAppSettings(): Promise<{ retentionDays: number; catchupWindowMinutes: number }>;
+  getAlertSettings(spaceId: string): Promise<AlertSettings>;
+  getAppSettings(spaceId: string): Promise<{ retentionDays: number; catchupWindowMinutes: number }>;
 }

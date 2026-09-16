@@ -15,7 +15,7 @@ import type { IncidentRefs, Store } from './store';
 type Row = Record<string, unknown>;
 
 /** External alert hook — invoked after an in-app notification is written. */
-export type AlertSink = (kind: string, title: string, body: string) => void;
+export type AlertSink = (kind: string, title: string, body: string, spaceId: string) => void;
 
 // discovered_chats: a bot added to / removed from a chat changes who can send there
 const CONFIG_TABLES = ['channels', 'routes', 'telegram_accounts', 'channel_memberships', 'discovered_chats'];
@@ -39,7 +39,9 @@ export class SupabaseStore implements Store {
   }
 
   async loadConfig(): Promise<RelayConfig> {
-    const [accounts, channels, memberships, routes, access] = await Promise.all([
+    const [spaces, accounts, channels, memberships, routes, access] = await Promise.all([
+      // disabled spaces relay nothing: their rows never enter the config
+      this.sb.from('spaces').select('id').is('disabled_at', null),
       // deterministic order — Postgres heap order shifts as rows are updated
       this.sb.from('telegram_accounts').select('*').order('created_at'),
       this.sb.from('channels').select('*').order('created_at'),
@@ -47,7 +49,7 @@ export class SupabaseStore implements Store {
       this.sb.from('routes').select('*').order('created_at'),
       this.sb
         .from('discovered_chats')
-        .select('account_id, tg_chat_id, can_read, can_post')
+        .select('space_id, account_id, tg_chat_id, can_read, can_post')
         .in('status', ['administrator', 'member', 'restricted']),
     ]);
     this.fail('accounts', accounts.error);
@@ -55,10 +57,15 @@ export class SupabaseStore implements Store {
     this.fail('memberships', memberships.error);
     this.fail('routes', routes.error);
     this.fail('discovered_chats', access.error);
+    this.fail('spaces', spaces.error);
+
+    const active = new Set((spaces.data ?? []).map((r: Row) => r['id'] as string));
+    const live = (r: Row) => active.has(r['space_id'] as string);
 
     return {
-      accounts: (accounts.data ?? []).map((r: Row) => ({
+      accounts: (accounts.data ?? []).filter(live).map((r: Row) => ({
         id: r['id'] as string,
+        spaceId: r['space_id'] as string,
         kind: r['kind'] as 'user' | 'bot',
         label: r['label'] as string,
         status: r['status'] as never,
@@ -69,8 +76,9 @@ export class SupabaseStore implements Store {
         tgId: r['tg_id'] == null ? undefined : String(r['tg_id']),
         username: (r['username'] as string) ?? undefined,
       })),
-      channels: (channels.data ?? []).map((r: Row) => ({
+      channels: (channels.data ?? []).filter(live).map((r: Row) => ({
         id: r['id'] as string,
+        spaceId: r['space_id'] as string,
         role: r['role'] as never,
         tgChatId: r['tg_chat_id'] == null ? null : String(r['tg_chat_id']),
         title: r['title'] as string,
@@ -81,7 +89,7 @@ export class SupabaseStore implements Store {
         isProtected: r['is_protected'] as boolean,
         isForum: Boolean(r['is_forum']),
       })),
-      memberships: (memberships.data ?? []).map((r: Row) => ({
+      memberships: (memberships.data ?? []).filter(live).map((r: Row) => ({
         accountId: r['account_id'] as string,
         channelId: r['channel_id'] as string,
         isMember: r['is_member'] as boolean,
@@ -90,8 +98,9 @@ export class SupabaseStore implements Store {
         canEdit: r['can_edit'] as boolean,
         canDelete: r['can_delete'] as boolean,
       })),
-      routes: (routes.data ?? []).map((r: Row) => ({
+      routes: (routes.data ?? []).filter(live).map((r: Row) => ({
         id: r['id'] as string,
+        spaceId: r['space_id'] as string,
         masterId: r['master_id'] as string,
         receiverId: r['receiver_id'] as string,
         enabled: r['enabled'] as boolean,
@@ -112,7 +121,7 @@ export class SupabaseStore implements Store {
           console.warn(`[store] route ${r['id']} has invalid rules (defaults used): ${detail}`),
         ),
       })),
-      chatAccess: (access.data ?? []).map((r: Row) => ({
+      chatAccess: (access.data ?? []).filter(live).map((r: Row) => ({
         accountId: r['account_id'] as string,
         tgChatId: String(r['tg_chat_id']),
         canRead: r['can_read'] as boolean,
@@ -214,15 +223,20 @@ export class SupabaseStore implements Store {
     return ((data as Row[]) ?? []).map((r) => this.fromRow(r));
   }
 
-  async parkStaleSending(before: Date, note: string): Promise<number> {
+  async parkStaleSending(before: Date, note: string): Promise<{ spaceId: string; count: number }[]> {
     const { data, error } = await this.sb
       .from('forwards')
       .update({ state: 'failed', last_error: note })
       .eq('state', 'sending')
       .lt('updated_at', before.toISOString())
-      .select('id');
+      .select('id, space_id');
     this.fail('parkStaleSending', error);
-    return (data ?? []).length;
+    const bySpace = new Map<string, number>();
+    for (const r of (data ?? []) as Row[]) {
+      const space = r['space_id'] as string;
+      bySpace.set(space, (bySpace.get(space) ?? 0) + 1);
+    }
+    return [...bySpace].map(([spaceId, count]) => ({ spaceId, count }));
   }
 
   async findPost(
@@ -320,16 +334,22 @@ export class SupabaseStore implements Store {
     this.fail('resolveIncidents', error);
   }
 
-  async notify(kind: string, title: string, body: string, incidentId?: string): Promise<void> {
-    const { error } = await this.sb.from('notifications').insert({
-      kind,
-      title,
-      body,
-      incident_id: incidentId ?? null,
-    });
+  async notify(
+    kind: string,
+    title: string,
+    body: string,
+    incidentId?: string,
+    spaceId?: string,
+  ): Promise<void> {
+    // the database fills space_id from the incident when not given
+    const { data, error } = await this.sb
+      .from('notifications')
+      .insert({ kind, title, body, incident_id: incidentId ?? null, space_id: spaceId ?? null })
+      .select('space_id')
+      .single();
     this.fail('notify', error);
     try {
-      this.alertSink(kind, title, body);
+      this.alertSink(kind, title, body, (data as Row)['space_id'] as string);
     } catch {
       // external alert failures must never break the relay path
     }
@@ -354,8 +374,9 @@ export class SupabaseStore implements Store {
     this.fail('upsertDiscoveredChat', error);
   }
 
-  async noteForumTopic(chatId: string, topicId: number, title: string): Promise<void> {
+  async noteForumTopic(spaceId: string, chatId: string, topicId: number, title: string): Promise<void> {
     const { error } = await this.sb.rpc('note_forum_topic', {
+      p_space: spaceId,
       p_chat: chatId,
       p_topic: topicId,
       p_title: title,
@@ -415,8 +436,12 @@ export class SupabaseStore implements Store {
     this.fail('setSecret', error);
   }
 
-  async getAlertSettings(): Promise<AlertSettings> {
-    const { data, error } = await this.sb.from('alert_settings').select('*').eq('id', 1).single();
+  async getAlertSettings(spaceId: string): Promise<AlertSettings> {
+    const { data, error } = await this.sb
+      .from('alert_settings')
+      .select('*')
+      .eq('space_id', spaceId)
+      .single();
     this.fail('getAlertSettings', error);
     const r = data as Row;
     return {
@@ -431,8 +456,12 @@ export class SupabaseStore implements Store {
     };
   }
 
-  async getAppSettings() {
-    const { data, error } = await this.sb.from('app_settings').select('*').eq('id', 1).single();
+  async getAppSettings(spaceId: string) {
+    const { data, error } = await this.sb
+      .from('app_settings')
+      .select('*')
+      .eq('space_id', spaceId)
+      .single();
     this.fail('getAppSettings', error);
     return {
       retentionDays: (data as Row)['retention_days'] as number,
@@ -442,6 +471,7 @@ export class SupabaseStore implements Store {
 
   /** Used by the admin API to register accounts created via login flows. */
   async insertAccount(fields: {
+    spaceId: string;
     kind: 'user' | 'bot';
     label: string;
     phone?: string;
@@ -453,6 +483,7 @@ export class SupabaseStore implements Store {
     const { data, error } = await this.sb
       .from('telegram_accounts')
       .insert({
+        space_id: fields.spaceId,
         kind: fields.kind,
         label: fields.label,
         phone: fields.phone ?? null,
@@ -465,6 +496,36 @@ export class SupabaseStore implements Store {
       .single();
     this.fail('insertAccount', error);
     return data!.id as string;
+  }
+
+  /** Space a row belongs to — the admin API checks it against the caller's space. */
+  async spaceOf(table: 'channels' | 'forwards', id: string): Promise<string | null> {
+    const { data, error } = await this.sb.from(table).select('space_id').eq('id', id).maybeSingle();
+    this.fail(`spaceOf ${table}`, error);
+    return ((data as Row | null)?.['space_id'] as string | undefined) ?? null;
+  }
+
+  async spaceIsActive(spaceId: string): Promise<boolean> {
+    const { data, error } = await this.sb
+      .from('spaces')
+      .select('id')
+      .eq('id', spaceId)
+      .is('disabled_at', null)
+      .maybeSingle();
+    this.fail('spaceIsActive', error);
+    return data !== null;
+  }
+
+  /** Which space (if any) already holds this Telegram identity. */
+  async findTelegramIdentity(kind: 'user' | 'bot', tgId: string): Promise<{ spaceId: string } | null> {
+    const { data, error } = await this.sb
+      .from('telegram_accounts')
+      .select('space_id')
+      .eq('kind', kind)
+      .eq('tg_id', tgId)
+      .maybeSingle();
+    this.fail('findTelegramIdentity', error);
+    return data ? { spaceId: (data as Row)['space_id'] as string } : null;
   }
 
   /** Channel + membership upserts used by resolve/join admin endpoints. */

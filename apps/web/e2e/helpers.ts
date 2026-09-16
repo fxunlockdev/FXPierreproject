@@ -3,7 +3,14 @@ import { join } from "node:path";
 import { expect, type APIRequestContext, type Page } from "@playwright/test";
 
 export const E2E_ADMIN = { email: "e2e@switchyard.test", password: "e2e-Sw1tchyard!pass" };
-export const E2E_INVITEE = { email: "activate2@switchyard.test", password: "e2e-Act1vate!pass" };
+/** The admin's space, created by prepare.mjs. */
+export const E2E_SPACE = "E2E Desk";
+export const NEW_USER_PASSWORD = "e2e-Newc0mer!pass";
+
+/** A unique throwaway address per call so specs never collide on reruns. */
+export function freshEmail(tag: string): string {
+  return `${tag}-${Date.now()}-${Math.floor(Math.random() * 1e6)}@switchyard.test`;
+}
 
 interface E2eEnv {
   apiUrl: string;
@@ -23,6 +30,28 @@ export async function signIn(page: Page, email = E2E_ADMIN.email, password = E2E
   await page.getByLabel("Password").fill(password);
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page.waitForURL("**/overview");
+}
+
+/** Create an account through the login page; optional space name or invite code. */
+export async function signUp(
+  page: Page,
+  email: string,
+  opts: { spaceName?: string; inviteCode?: string } = {},
+) {
+  await page.goto("/login");
+  await page.getByRole("button", { name: /create an account/i }).click();
+  await page.getByLabel("Email").fill(email);
+  await page.getByLabel("Password").fill(NEW_USER_PASSWORD);
+  if (opts.inviteCode) {
+    const codeField = page.getByLabel("Invite code");
+    if (!(await codeField.isVisible())) {
+      await page.getByRole("button", { name: /have an invite code/i }).click();
+    }
+    await codeField.fill(opts.inviteCode);
+  } else if (opts.spaceName) {
+    await page.getByLabel("Space name").fill(opts.spaceName);
+  }
+  await page.getByRole("button", { name: /^create account/i }).click();
 }
 
 /** Talk to the worker's sim API directly (same thing the relay does live). */

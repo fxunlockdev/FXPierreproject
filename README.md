@@ -14,7 +14,7 @@ apps/
 packages/
 └── core/      Pure rules engine: filters, entity-aware transforms, scheduling (100% shared)
 supabase/
-└── migrations/  Schema, RLS, invite-only auth, cron watchdog & retention
+└── migrations/  Schema, RLS, private spaces, cron watchdog & retention
 ```
 
 ## Prerequisites
@@ -47,8 +47,25 @@ pnpm --filter @pierre/worker dev   # relay worker (SIMULATE=1 works without Tele
 pnpm --filter web dev              # dashboard on http://localhost:3000
 ```
 
-Sign in with an invited email (invite-only — enforced in the database), connect the Telegram
-user account and bot from **Accounts**, add channels, wire routes. Everything applies live.
+Create an account on the login page — you land in your own blank space. Connect a bot from
+**Accounts**, add channels, wire routes. Everything applies live.
+
+## Private spaces
+
+Every account works inside a **space**: its bots, channels, routes, logs, alerts and settings
+are visible only to that space's members. Isolation is enforced by row-level security in the
+database and by the worker, which scopes every relay decision and admin call to one space.
+
+- **Sign-up** creates a blank space owned by the new user.
+- **Teammates** join through a one-time invite code (Settings → Team, valid 7 days) as
+  *viewer* (read-only) or *admin*. Existing users enter a code under “Join another space”.
+- **Platform admin** (`/admin`) lists spaces with counts only — never their content — can
+  disable a space (relaying stops, members lose access) and can close sign-ups, after which
+  only invite codes create accounts. Grant it once per operator:
+
+  ```sql
+  insert into platform_admins select id from auth.users where email = 'you@example.com';
+  ```
 
 ## Test
 
@@ -73,11 +90,13 @@ pnpm --filter web test:e2e         # full end-to-end against simulated Telegram
 
 ## Production checklist (before real traffic)
 
-1. **Supabase Auth → enable "Confirm email".** Invites are enforced in the database, but
-   without mailbox confirmation an attacker who guesses an invited email could claim it
-   before its owner signs up. With confirmation on, the membership link only happens after
-   the owner proves control of the inbox (`0005_review_hardening.sql`).
-2. Disable any other auth providers / public signups in the Supabase dashboard.
+1. **Supabase Auth → keep email sign-ups enabled**; open/close registration from `/admin`
+   instead (enforced by a database trigger, so the auth API can't bypass it). Disable any
+   other auth providers you don't use.
+2. **"Confirm email"** stops people registering addresses they don't own. Turn it on only
+   with a custom SMTP sender configured — Supabase's built-in mailer is heavily rate-limited
+   and would block real sign-ups. Access to a space never depends on the email address
+   (only on membership and invite codes), so leaving it off cannot leak a space.
 3. Set a strong `SESSION_ENCRYPTION_KEY` and `WORKER_API_TOKEN`; never reuse dev values.
 4. Keep the worker's admin API (`:8788`) unreachable from the public internet — only the
    dashboard's server-side proxy needs it.

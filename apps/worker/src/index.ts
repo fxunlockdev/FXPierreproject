@@ -18,19 +18,20 @@ async function main(): Promise<void> {
   // Wiring order matters: the store's alert sink calls the dispatcher, and the
   // dispatcher sends through whichever transport the engine currently holds.
   let dispatcher: AlertDispatcher | null = null;
-  const store = new SupabaseStore(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, (k, t, b) => {
-    void dispatcher?.dispatch(k, t, b);
+  const store = new SupabaseStore(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, (k, t, b, space) => {
+    void dispatcher?.dispatch(k, t, b, space);
   });
   const engine = new RelayEngine(store, { immediateDelivery: true });
 
   dispatcher = new AlertDispatcher({
-    getSettings: () => store.getAlertSettings(),
-    sendTelegram: async (target, text) => {
+    getSettings: (spaceId) => store.getAlertSettings(spaceId),
+    sendTelegram: async (spaceId, target, text) => {
       if (env.SIMULATE) {
         console.log(`[sim alert → ${target}] ${text}`);
         return;
       }
-      const ordered = [...engine.config.accounts].sort(
+      // only this space's own accounts may deliver its alerts
+      const ordered = engine.config.accounts.filter((a) => a.spaceId === spaceId).sort(
         (a, b) =>
           Number(b.isAlertSender) - Number(a.isAlertSender) ||
           (a.kind === 'bot' ? -1 : 1) - (b.kind === 'bot' ? -1 : 1),
@@ -44,7 +45,7 @@ async function main(): Promise<void> {
           return;
         }
       }
-      throw new Error('no connected Telegram account is available to deliver alerts');
+      throw new Error('no connected Telegram account in this space can deliver alerts');
     },
   });
 

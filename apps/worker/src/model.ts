@@ -19,6 +19,8 @@ export type IncidentKind =
 
 export interface Account {
   id: string;
+  /** Private space (tenant) this account belongs to */
+  spaceId?: string;
   kind: AccountKind;
   label: string;
   status: AccountStatus;
@@ -32,6 +34,7 @@ export interface Account {
 
 export interface Channel {
   id: string;
+  spaceId?: string;
   role: ChannelRole;
   tgChatId: string | null;
   title: string;
@@ -56,6 +59,7 @@ export interface Membership {
 
 export interface Route {
   id: string;
+  spaceId?: string;
   masterId: string;
   receiverId: string;
   enabled: boolean;

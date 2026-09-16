@@ -20,6 +20,7 @@ import {
   useRoutes,
   useUpdateChannel,
 } from "@/lib/queries";
+import { useSpaceId } from "@/lib/space";
 import { supabaseBrowser } from "@/lib/supabase/client";
 import type { ChannelRow, DiscoveredChatRow } from "@/lib/types";
 import { workerCall } from "@/lib/worker";
@@ -41,12 +42,13 @@ function AddChannelDialog() {
   const [picking, setPicking] = useState<string | null>(null);
   const insert = useInsertChannel();
   const qc = useQueryClient();
+  const spaceId = useSpaceId();
 
   /** Save the row, then have the worker verify it with Telegram right away. */
   const addChannel = async (row: Partial<ChannelRow>, ref: string, label: string) => {
     const { data, error } = await supabaseBrowser()
       .from("channels")
-      .insert({ role, ...row })
+      .insert({ role, ...row, space_id: spaceId })
       .select("id")
       .single();
     if (error) throw new Error(error.message);

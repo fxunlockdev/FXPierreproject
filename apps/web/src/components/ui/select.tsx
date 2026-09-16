@@ -28,7 +28,8 @@ export function Select({
   "id" | "aria-label" | "aria-describedby" | "aria-invalid"
 >) {
   return (
-    <RadixSelect.Root value={value} onValueChange={onValueChange} disabled={disabled}>
+    // "" keeps the Root controlled while showing the placeholder
+    <RadixSelect.Root value={value ?? ""} onValueChange={onValueChange} disabled={disabled}>
       <RadixSelect.Trigger
         {...triggerProps}
         className={`flex h-9.5 items-center justify-between gap-2 rounded-lg border border-edge bg-surface px-3 text-sm text-ink transition-colors hover:border-edge-strong focus:border-live focus:outline-none disabled:opacity-45 data-[placeholder]:text-faint ${className}`}

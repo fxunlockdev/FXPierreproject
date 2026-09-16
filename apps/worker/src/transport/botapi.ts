@@ -262,7 +262,7 @@ export class BotApiTransport implements Transport {
     const title = topicTitleOf(m, topicId);
     if (this.knownTopics.has(key) && !title) return;
     this.knownTopics.add(key);
-    void Promise.resolve(handlers.onTopicSeen(String(m.chat.id), topicId, title)).catch((err) =>
+    void Promise.resolve(handlers.onTopicSeen(this.accountId, String(m.chat.id), topicId, title)).catch((err) =>
       console.warn(`[bot:${this.username}] could not record topic ${key}: ${errorText(err)}`),
     );
   }

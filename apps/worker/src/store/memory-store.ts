@@ -24,7 +24,7 @@ export class MemoryStore implements Store {
   config: RelayConfig = { accounts: [], channels: [], memberships: [], routes: [] };
   forwards = new Map<string, ForwardRecord>();
   incidents: MemoryIncident[] = [];
-  notifications: { kind: string; title: string; body: string }[] = [];
+  notifications: { kind: string; title: string; body: string; spaceId?: string }[] = [];
   secrets = new Map<string, string>();
   heartbeats: Heartbeat[] = [];
   alertSettings: AlertSettings = {
@@ -95,7 +95,7 @@ export class MemoryStore implements Store {
     return structuredClone(due);
   }
 
-  async parkStaleSending(before: Date, note: string): Promise<number> {
+  async parkStaleSending(before: Date, note: string): Promise<{ spaceId: string; count: number }[]> {
     let parked = 0;
     for (const [id, since] of this.sendingSince) {
       const row = this.forwards.get(id);
@@ -106,7 +106,7 @@ export class MemoryStore implements Store {
         parked += 1;
       }
     }
-    return parked;
+    return parked > 0 ? [{ spaceId: '', count: parked }] : [];
   }
 
   async findPost(routeId: string, srcMessageId: number): Promise<ForwardRecord | null> {
@@ -159,8 +159,8 @@ export class MemoryStore implements Store {
     }
   }
 
-  async notify(kind: string, title: string, body: string): Promise<void> {
-    this.notifications.push({ kind, title, body });
+  async notify(kind: string, title: string, body: string, _incidentId?: string, spaceId?: string): Promise<void> {
+    this.notifications.push({ kind, title, body, spaceId });
   }
 
   async setChannelHealth(channelId: string, health: ChannelHealth, error?: string): Promise<void> {
@@ -182,7 +182,7 @@ export class MemoryStore implements Store {
 
   topics = new Map<string, string>();
 
-  async noteForumTopic(chatId: string, topicId: number, title: string): Promise<void> {
+  async noteForumTopic(_spaceId: string, chatId: string, topicId: number, title: string): Promise<void> {
     const key = `${chatId}:${topicId}`;
     if (title || !this.topics.has(key)) this.topics.set(key, title);
   }
@@ -211,11 +211,11 @@ export class MemoryStore implements Store {
     this.secrets.set(accountId, secret);
   }
 
-  async getAlertSettings(): Promise<AlertSettings> {
+  async getAlertSettings(_spaceId: string): Promise<AlertSettings> {
     return structuredClone(this.alertSettings);
   }
 
-  async getAppSettings() {
+  async getAppSettings(_spaceId: string) {
     return { retentionDays: 30, catchupWindowMinutes: 15 };
   }
 }

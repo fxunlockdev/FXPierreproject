@@ -10,10 +10,11 @@ import {
   useForwards,
   useForwardsToday,
   useIncidents,
+  usePendingCount,
   useRoutes,
-  useWorkerStatus,
 } from "@/lib/queries";
 import { INCIDENT_LABELS } from "@/lib/types";
+import { SetupChecklist } from "./setup-checklist";
 
 /** 24 hourly bars, sent vs failed — hand-drawn, no chart library. */
 function ActivityChart({
@@ -71,7 +72,7 @@ export default function OverviewPage() {
   const { data: today, isLoading: loadingToday } = useForwardsToday();
   const { data: recent } = useForwards({}, 8);
   const { data: incidents } = useIncidents();
-  const { data: workers } = useWorkerStatus();
+  const { data: pending } = usePendingCount();
   const { data: routes } = useRoutes();
   const { data: channels } = useChannels();
 
@@ -81,7 +82,7 @@ export default function OverviewPage() {
   const attempted = done.length + failed.length;
   const latencies = done.map((f) => f.latency_ms ?? 0).filter((v) => v > 0).sort((a, b) => a - b);
   const median = latencies.length > 0 ? latencies[Math.floor(latencies.length / 2)] : null;
-  const queueDepth = workers?.reduce((sum, w) => sum + w.queue_depth, 0) ?? 0;
+  const queueDepth = pending ?? 0;
   const open = (incidents ?? []).filter((i) => i.status === "open");
   const channelById = new Map((channels ?? []).map((c) => [c.id, c]));
 
@@ -94,6 +95,8 @@ export default function OverviewPage() {
           {channels?.filter((c) => c.role === "master").length ?? "—"} masters
         </p>
       </header>
+
+      <SetupChecklist />
 
       {loadingToday ? (
         <Skeleton className="h-24 w-full" />

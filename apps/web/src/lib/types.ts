@@ -7,6 +7,36 @@ export type AccountStatus = "pending" | "connected" | "relogin_required" | "rest
 export type ForwardState = "queued" | "scheduled" | "held" | "sending" | "done" | "failed" | "dropped";
 
 export type ChatType = "channel" | "supergroup" | "group";
+export type SpaceRole = "owner" | "admin" | "viewer";
+
+/** A private space the signed-in user belongs to (from my_spaces()). */
+export interface SpaceInfo {
+  id: string;
+  name: string;
+  role: SpaceRole;
+  disabled: boolean;
+}
+
+export interface SpaceMemberRow {
+  user_id: string;
+  email: string;
+  role: SpaceRole;
+  created_at: string;
+}
+
+/** Platform-admin view of a space: metadata only, never its content. */
+export interface AdminSpaceRow {
+  id: string;
+  name: string;
+  owner_email: string | null;
+  created_at: string;
+  disabled: boolean;
+  members: number;
+  bots: number;
+  channels: number;
+  routes: number;
+  forwards_24h: number;
+}
 
 /** A chat a connected account is in — filled by the worker as it sees them. */
 export interface DiscoveredChatRow {
@@ -132,18 +162,13 @@ export interface NotificationRow {
   created_at: string;
 }
 
-export interface WorkerStatusRow {
-  instance_id: string;
-  started_at: string;
+export interface RelayStatusRow {
   heartbeat_at: string;
-  version: string | null;
-  accounts_online: number;
-  queue_depth: number;
   simulate: boolean;
 }
 
 export interface AlertSettingsRow {
-  id: number;
+  space_id: string;
   telegram_enabled: boolean;
   telegram_target: string | null;
   email_enabled: boolean;
@@ -157,17 +182,9 @@ export interface AlertSettingsRow {
 }
 
 export interface AppSettingsRow {
-  id: number;
+  space_id: string;
   retention_days: number;
   catchup_window_minutes: number;
-}
-
-export interface MemberRow {
-  id: string;
-  user_id: string | null;
-  email: string;
-  role: "admin" | "viewer";
-  created_at: string;
 }
 
 export interface AuditRow {
