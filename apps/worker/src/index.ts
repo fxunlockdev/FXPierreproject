@@ -139,7 +139,9 @@ async function main(): Promise<void> {
     sim,
     registerTransport,
   });
-  await app.listen({ port: env.PORT, host: '0.0.0.0' });
+  // '::' = dual-stack — Railway's private network is IPv6-only, and the
+  // dashboard reaches this API over it (worker.railway.internal)
+  await app.listen({ port: env.PORT, host: '::' });
   console.log(`[worker] admin API listening on :${env.PORT}`);
 
   const shutdown = async (): Promise<void> => {
