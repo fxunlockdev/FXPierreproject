@@ -99,7 +99,13 @@ function AddChannelDialog() {
     setPicking(chatId);
     try {
       await addChannel(
-        { tg_chat_id: chatId, title: chat.title, username: chat.username, chat_type: chat.chat_type },
+        {
+          tg_chat_id: chatId,
+          title: chat.title,
+          username: chat.username,
+          chat_type: chat.chat_type,
+          is_forum: chat.is_forum,
+        },
         chatId,
         chat.title,
       );
@@ -184,7 +190,8 @@ function ChannelRowItem({ channel, routeCount }: { channel: ChannelRow; routeCou
           )}
         </div>
         <p className="truncate font-mono text-[11.5px] text-faint">
-          {channel.chat_type && `${channel.chat_type === "channel" ? "channel" : "group"} · `}
+          {channel.chat_type &&
+            `${channel.chat_type === "channel" ? "channel" : channel.is_forum ? "group with topics" : "group"} · `}
           {channel.username
             ? `@${channel.username}`
             : channel.tg_chat_id != null

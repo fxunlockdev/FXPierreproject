@@ -180,6 +180,13 @@ export class MemoryStore implements Store {
     this.discovered.set(`${accountId}:${chat.tgChatId}`, { ...chat, accountId });
   }
 
+  topics = new Map<string, string>();
+
+  async noteForumTopic(chatId: string, topicId: number, title: string): Promise<void> {
+    const key = `${chatId}:${topicId}`;
+    if (title || !this.topics.has(key)) this.topics.set(key, title);
+  }
+
   async migrateChatId(oldChatId: string, newChatId: string): Promise<void> {
     for (const ch of this.config.channels) {
       if (ch.tgChatId === oldChatId) ch.tgChatId = newChatId;

@@ -1,14 +1,23 @@
-import type { RelayMessage, RichText } from '@pierre/core';
+import type { MediaKind, RelayMessage, RichText } from '@pierre/core';
 
 /** Normalized failure classes the sender knows how to react to. */
 export type TransportErrorCode =
   | 'flood_wait' // retry after `retryAfterSeconds`
   | 'forbidden' // no permission to post/edit in the target
   | 'protected' // source restricts forwarding/copying
-  | 'not_found' // chat or message gone
+  | 'not_found' // the TARGET chat is gone
+  | 'rejected' // Telegram refused this particular message — retrying won't help
   | 'session_revoked'
   | 'network'
   | 'unknown';
+
+/** One item of an album, as needed to re-send the album grouped. */
+export interface AlbumItem {
+  messageId: number;
+  media: MediaKind;
+  fileId?: string;
+  hasSpoiler?: boolean;
+}
 
 export class TransportError extends Error {
   constructor(
@@ -31,6 +40,10 @@ export interface SendOptions {
   silent: boolean;
   removeButtons: boolean;
   mediaKind: string;
+  /** Per-item details for albums, aligned with srcMessageIds. */
+  items?: AlbumItem[];
+  /** Post into this forum topic of the target (omit / 1 = General). */
+  topicId?: number | null;
   /**
    * Checkpoint callback: transports that send albums item by item (Bot API)
    * MUST await it after each item with all dest ids so far, so the engine can
@@ -46,6 +59,9 @@ export interface SendOptions {
 
 export type ChatType = 'channel' | 'supergroup' | 'group';
 
+/** Topic id of a forum's General topic. Posting there needs no thread id. */
+export const GENERAL_TOPIC_ID = 1;
+
 export interface ResolvedChannel {
   tgChatId: string;
   title: string;
@@ -53,6 +69,8 @@ export interface ResolvedChannel {
   isProtected: boolean;
   memberCount?: number;
   chatType?: ChatType;
+  /** A group with Topics enabled */
+  isForum?: boolean;
 }
 
 /** A chat an account is (or was) in — powers pick-from-list in the dashboard. */
@@ -65,6 +83,7 @@ export interface DiscoveredChat {
   /** Receives every new message there (admin, or group privacy mode off). */
   canRead: boolean;
   canPost: boolean;
+  isForum: boolean;
 }
 
 export interface ReaderHandlers {
@@ -75,6 +94,8 @@ export interface ReaderHandlers {
   onChatSeen?(accountId: string, chat: DiscoveredChat, membershipChanged: boolean): void | Promise<void>;
   /** A basic group became a supergroup and got a new id. */
   onChatMigrated?(oldChatId: string, newChatId: string): void | Promise<void>;
+  /** A message revealed a forum topic (title is '' when Telegram didn't say). */
+  onTopicSeen?(chatId: string, topicId: number, title: string): void | Promise<void>;
 }
 
 /**

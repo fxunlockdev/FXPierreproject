@@ -18,6 +18,15 @@ export interface DiscoveredChatRow {
   status: "administrator" | "member" | "restricted" | "left" | "kicked";
   can_read: boolean;
   can_post: boolean;
+  is_forum: boolean;
+  last_seen_at: string;
+}
+
+/** A topic of a forum group, as seen by the relay. */
+export interface ForumTopicRow {
+  tg_chat_id: number | string;
+  topic_id: number;
+  title: string;
   last_seen_at: string;
 }
 
@@ -26,6 +35,7 @@ export interface ChannelRow {
   role: ChannelRole;
   tg_chat_id: number | string | null;
   chat_type: ChatType | null;
+  is_forum: boolean;
   title: string;
   username: string | null;
   invite_link: string | null;
@@ -53,6 +63,10 @@ export interface RouteRow {
   sync_edits: boolean;
   sync_deletes: boolean;
   rules: unknown;
+  /** forum master: relay only this topic (null = whole chat) */
+  source_topic_id: number | null;
+  /** forum receiver: post into this topic (null = General) */
+  target_topic_id: number | null;
   created_at: string;
 }
 

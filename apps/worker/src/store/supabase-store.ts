@@ -73,6 +73,7 @@ export class SupabaseStore implements Store {
         enabled: r['enabled'] as boolean,
         health: r['health'] as ChannelHealth,
         isProtected: r['is_protected'] as boolean,
+        isForum: Boolean(r['is_forum']),
       })),
       memberships: (memberships.data ?? []).map((r: Row) => ({
         accountId: r['account_id'] as string,
@@ -99,6 +100,8 @@ export class SupabaseStore implements Store {
         pausedUntil: r['paused_until'] ? new Date(r['paused_until'] as string) : null,
         syncEdits: r['sync_edits'] as boolean,
         syncDeletes: r['sync_deletes'] as boolean,
+        sourceTopicId: r['source_topic_id'] == null ? null : Number(r['source_topic_id']),
+        targetTopicId: r['target_topic_id'] == null ? null : Number(r['target_topic_id']),
         rules: parseRouteRules(r['rules'], (detail) =>
           console.warn(`[store] route ${r['id']} has invalid rules (defaults used): ${detail}`),
         ),
@@ -329,11 +332,21 @@ export class SupabaseStore implements Store {
         status: chat.status,
         can_read: chat.canRead,
         can_post: chat.canPost,
+        is_forum: chat.isForum,
         last_seen_at: new Date().toISOString(),
       },
       { onConflict: 'account_id,tg_chat_id' },
     );
     this.fail('upsertDiscoveredChat', error);
+  }
+
+  async noteForumTopic(chatId: string, topicId: number, title: string): Promise<void> {
+    const { error } = await this.sb.rpc('note_forum_topic', {
+      p_chat: chatId,
+      p_topic: topicId,
+      p_title: title,
+    });
+    this.fail('noteForumTopic', error);
   }
 
   async migrateChatId(oldChatId: string, newChatId: string): Promise<void> {
@@ -452,6 +465,7 @@ export class SupabaseStore implements Store {
         title: meta.title,
         username: meta.username ?? null,
         chat_type: meta.chatType ?? null,
+        is_forum: meta.isForum ?? false,
         is_protected: meta.isProtected,
         health: meta.isProtected ? 'protected' : 'ok',
       })

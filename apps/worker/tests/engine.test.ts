@@ -629,7 +629,7 @@ describe('RelayEngine — chat discovery', () => {
       'acc-sim',
       {
         tgChatId: '-1009876543210', chatType: 'supergroup', title: 'Private group',
-        status: 'administrator', canRead: true, canPost: true,
+        status: 'administrator', canRead: true, canPost: true, isForum: true,
       },
       true,
     );
@@ -641,5 +641,105 @@ describe('RelayEngine — chat discovery', () => {
     await sim.injectPost('-1005550001111', 'after upgrade');
     await drain();
     expect(sim.sent).toHaveLength(1);
+  });
+});
+
+describe('RelayEngine — media and message-level failures', () => {
+  it('passes album file references through, so the album is re-sent grouped', async () => {
+    await sim.injectPost(MASTER_TG, '', { media: 'photo', albumKey: 'alb-f', messageId: 950 });
+    await sim.injectPost(MASTER_TG, 'caption', { media: 'document', albumKey: 'alb-f', messageId: 951 });
+    await sleep(40);
+    await drain();
+
+    expect(sim.sent).toHaveLength(1);
+    expect(sim.sent[0]!.items?.map((i) => [i.messageId, i.media])).toEqual([
+      [950, 'photo'],
+      [951, 'document'],
+    ]);
+  });
+
+  it('a text post the rules strip bare is dropped with a reason, not sent empty', async () => {
+    store.config.routes = [baseRoute({ rules: parseRouteRules({ linkRemoval: { urls: 'all' } }) })];
+    await engine.reload();
+
+    await sim.injectPost(MASTER_TG, 'https://example.com/promo');
+    await drain();
+
+    expect(sim.sent).toHaveLength(0);
+    const row = [...store.forwards.values()][0]!;
+    expect(row.state).toBe('dropped');
+    expect(row.dropReason).toContain('nothing left to send');
+  });
+
+  it('a message Telegram rejects fails once — no retries, no incident, route stays on', async () => {
+    sim.failures.set(RECEIVER1_TG, { code: 'rejected', times: 1 });
+
+    await sim.injectPost(MASTER_TG, 'deleted before we copied it');
+    await drain();
+
+    const row = [...store.forwards.values()][0]!;
+    expect(row.state).toBe('failed');
+    expect(row.attempts).toBe(1);
+    expect(row.lastError).toContain('rejected');
+    expect(store.incidents).toHaveLength(0);
+    expect(store.config.routes[0]!.enabled).toBe(true);
+
+    await sim.injectPost(MASTER_TG, 'the next post still relays');
+    await drain();
+    expect(sim.sent.map((s) => s.text.text)).toEqual(['the next post still relays']);
+  });
+});
+
+describe('RelayEngine — forum topics', () => {
+  it('a topic route relays only that topic, silently ignoring the rest of the forum', async () => {
+    store.config.routes = [baseRoute({ sourceTopicId: 5 })];
+    await engine.reload();
+
+    await sim.injectPost(MASTER_TG, 'gold setup', { topicId: 5 });
+    await sim.injectPost(MASTER_TG, 'off-topic chatter', { topicId: 9 });
+    await sim.injectPost(MASTER_TG, 'general hello', { topicId: 1 });
+    await drain();
+
+    expect(sim.sent.map((s) => s.text.text)).toEqual(['gold setup']);
+    expect(store.forwards.size).toBe(1); // no "dropped" noise for other topics
+  });
+
+  it('a whole-chat route relays every topic', async () => {
+    await sim.injectPost(MASTER_TG, 'from topic 5', { topicId: 5 });
+    await sim.injectPost(MASTER_TG, 'from general', { topicId: 1 });
+    await drain();
+    expect(sim.sent).toHaveLength(2);
+  });
+
+  it('posts into the receiver topic the route targets', async () => {
+    store.config.routes = [baseRoute({ targetTopicId: 12 })];
+    await engine.reload();
+
+    await sim.injectPost(MASTER_TG, 'into topic 12');
+    await drain();
+    expect(sim.sent[0]!.topicId).toBe(12);
+  });
+
+  it('one forum can feed different receivers per topic', async () => {
+    store.config.routes = [
+      baseRoute({ id: 'gold', sourceTopicId: 5, receiverId: 'r1' }),
+      baseRoute({ id: 'fx', sourceTopicId: 7, receiverId: 'r2' }),
+    ];
+    await engine.reload();
+
+    await sim.injectPost(MASTER_TG, 'gold', { topicId: 5 });
+    await sim.injectPost(MASTER_TG, 'eurusd', { topicId: 7 });
+    await drain();
+
+    expect(sim.sent.map((s) => [s.text.text, s.toChatId])).toEqual([
+      ['gold', RECEIVER1_TG],
+      ['eurusd', RECEIVER2_TG],
+    ]);
+  });
+
+  it('records topics a reader reports, never erasing a known name', async () => {
+    await engine.handlers.onTopicSeen?.(MASTER_TG, 5, 'Gold');
+    await engine.handlers.onTopicSeen?.(MASTER_TG, 5, '');
+    expect(store.topics.get(`${MASTER_TG}:5`)).toBe('Gold');
   });
 });

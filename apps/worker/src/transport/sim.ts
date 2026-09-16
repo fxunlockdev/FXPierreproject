@@ -2,6 +2,7 @@ import type { MediaKind, RelayMessage, RichText } from '@pierre/core';
 import { richText } from '@pierre/core';
 import {
   TransportError,
+  type AlbumItem,
   type ReaderHandlers,
   type ResolvedChannel,
   type SendOptions,
@@ -19,6 +20,8 @@ export interface SentRecord {
   removeButtons: boolean;
   native: boolean; // true = forward(), false = copy()
   applyCaption?: boolean;
+  items?: AlbumItem[];
+  topicId?: number | null;
 }
 
 /**
@@ -52,12 +55,19 @@ export class SimTransport implements Transport {
   async injectPost(
     chatId: string,
     text: string,
-    opts: { media?: MediaKind; albumKey?: string; messageId?: number; entities?: RichText['entities'] } = {},
+    opts: {
+      media?: MediaKind;
+      albumKey?: string;
+      messageId?: number;
+      entities?: RichText['entities'];
+      topicId?: number;
+    } = {},
   ): Promise<RelayMessage> {
     const msg: RelayMessage = {
       chatId,
       messageId: opts.messageId ?? this.nextSrcId++,
       albumKey: opts.albumKey,
+      topicId: opts.topicId,
       date: Math.floor(Date.now() / 1000),
       media: opts.media ?? 'text',
       text: richText(text, opts.entities ?? []),

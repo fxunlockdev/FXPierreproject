@@ -66,6 +66,18 @@ export interface RelayMessage {
   /** Message text, or caption for media messages */
   text: RichText;
   hasButtons?: boolean;
+  /**
+   * Telegram file reference of the media, when the reader provides one. Lets
+   * an album be re-sent as ONE grouped album with its transformed caption.
+   */
+  fileId?: string;
+  /** Media is hidden behind a spoiler */
+  hasSpoiler?: boolean;
+  /**
+   * Forum topic the message was posted in (1 = General). Undefined when the
+   * chat is not a forum.
+   */
+  topicId?: number;
 }
 
 /** Context the pipeline needs to expand header/footer variables. */

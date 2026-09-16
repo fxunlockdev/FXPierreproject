@@ -21,7 +21,15 @@ import { Field, Input, Textarea } from "@/components/ui/field";
 import { Select } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList } from "@/components/ui/tabs";
-import { useUpdateRoute } from "@/lib/queries";
+import { useForumTopics, useUpdateRoute } from "@/lib/queries";
+import {
+  isForum,
+  sourceTopicToValue,
+  targetTopicToValue,
+  topicOptions,
+  valueToSourceTopic,
+  valueToTargetTopic,
+} from "@/lib/topics";
 import { useNow } from "@/lib/use-now";
 import type { AccountRow, ChannelRow, RouteRow } from "@/lib/types";
 
@@ -52,6 +60,8 @@ interface EditorState {
   rules: RouteRules;
   scheduleEnabled: boolean;
   schedule: RouteSchedule;
+  source_topic_id: number | null;
+  target_topic_id: number | null;
 }
 
 function SwitchRow({
@@ -206,6 +216,9 @@ export function RouteEditor({
   onClose: () => void;
 }) {
   const update = useUpdateRoute();
+  const { data: topics } = useForumTopics();
+  const masterIsForum = isForum(master, topics);
+  const receiverIsForum = isForum(receiver, topics);
   const [state, setState] = useState<EditorState>(() => {
     const schedule = parseRouteSchedule(route.schedule);
     return {
@@ -219,6 +232,8 @@ export function RouteEditor({
       rules: parseRouteRules(route.rules),
       scheduleEnabled: schedule !== null,
       schedule: schedule ?? { tz: "UTC", windows: [], offWindow: "hold" },
+      source_topic_id: route.source_topic_id,
+      target_topic_id: route.target_topic_id,
     };
   });
 
@@ -244,6 +259,8 @@ export function RouteEditor({
           sync_deletes: state.sync_deletes,
           rules: state.rules as unknown,
           schedule: state.scheduleEnabled && state.schedule.windows.length > 0 ? (state.schedule as unknown) : null,
+          source_topic_id: masterIsForum ? state.source_topic_id : null,
+          target_topic_id: receiverIsForum ? state.target_topic_id : null,
         },
       },
       {
@@ -307,6 +324,27 @@ export function RouteEditor({
                   options={senderOptions}
                 />
               </Field>
+              {masterIsForum && (
+                <Field
+                  label="From topic"
+                  hint="Relay only posts made in this topic of the master. Topics appear here once someone posts in them."
+                >
+                  <Select
+                    value={sourceTopicToValue(state.source_topic_id)}
+                    onValueChange={(v) => set("source_topic_id", valueToSourceTopic(v))}
+                    options={topicOptions(master, topics, { includeAll: true })}
+                  />
+                </Field>
+              )}
+              {receiverIsForum && (
+                <Field label="Into topic" hint="Which topic of the receiver the posts land in.">
+                  <Select
+                    value={targetTopicToValue(state.target_topic_id)}
+                    onValueChange={(v) => set("target_topic_id", valueToTargetTopic(v))}
+                    options={topicOptions(receiver, topics, { includeAll: false })}
+                  />
+                </Field>
+              )}
             </div>
             <SwitchRow
               title="Silent delivery"
@@ -329,7 +367,7 @@ export function RouteEditor({
             />
             <SwitchRow
               title="Sync deletes"
-              hint="When the master deletes a post, delete the receiver copy. Copy mode only."
+              hint="When the master deletes a post, delete the receiver copy. Copy mode only. Needs a connected Telegram user account — Telegram never tells bots about deletions."
               checked={state.sync_deletes}
               onChange={(v) => set("sync_deletes", v)}
               disabled={state.mode === "forward"}

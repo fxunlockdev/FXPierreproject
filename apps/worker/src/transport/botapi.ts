@@ -2,7 +2,9 @@ import { Bot, GrammyError, HttpError } from 'grammy';
 import type { ChatMember, Message } from 'grammy/types';
 import type { Entity, MediaKind, RelayMessage, RichText } from '@pierre/core';
 import {
+  GENERAL_TOPIC_ID,
   TransportError,
+  type AlbumItem,
   type ChatType,
   type DiscoveredChat,
   type ReaderHandlers,
@@ -78,21 +80,96 @@ function mediaKindOf(m: Message): MediaKind {
   return 'other';
 }
 
+/**
+ * Telegram error → what the engine should do about it. The distinction that
+ * matters most: a problem with the RECEIVER (pause the route, raise an
+ * incident) vs. a problem with THIS MESSAGE (fail it, keep relaying the rest).
+ */
 export function mapBotError(err: unknown): TransportError {
   if (err instanceof GrammyError) {
+    const d = err.description;
     if (err.error_code === 429) {
       const retryAfter = (err.parameters?.retry_after as number | undefined) ?? 30;
-      return new TransportError('flood_wait', err.description, retryAfter);
+      return new TransportError('flood_wait', d, retryAfter);
     }
-    if (err.error_code === 403) return new TransportError('forbidden', err.description);
-    if (err.error_code === 401) return new TransportError('session_revoked', err.description);
-    if (/not found|not_found|chat not found|message to copy not found/i.test(err.description)) {
-      return new TransportError('not_found', err.description);
+    if (err.error_code === 401) return new TransportError('session_revoked', d);
+    if (err.error_code === 403) return new TransportError('forbidden', d);
+    if (/protected content|forwards? (is |are )?restricted/i.test(d)) {
+      return new TransportError('protected', d);
     }
-    return new TransportError('unknown', err.description);
+    if (/not enough rights|administrator rights|have no rights|CHAT_ADMIN_REQUIRED|CHAT_WRITE_FORBIDDEN/i.test(d)) {
+      return new TransportError('forbidden', d);
+    }
+    // the source post was deleted before we copied it — not the receiver's fault
+    if (/message to (copy|forward|edit|delete) not found|MESSAGE_ID_INVALID/i.test(d)) {
+      return new TransportError('rejected', d);
+    }
+    if (/chat not found|PEER_ID_INVALID|CHANNEL_INVALID|group chat was upgraded/i.test(d)) {
+      return new TransportError('not_found', d);
+    }
+    // any other 400 is about this message's content; retrying can't fix it
+    if (err.error_code === 400) return new TransportError('rejected', d);
+    return new TransportError('unknown', d);
   }
   if (err instanceof HttpError) return new TransportError('network', String(err));
   return new TransportError('unknown', err instanceof Error ? err.message : String(err));
+}
+
+/** Media Telegram lets you attach a caption to. */
+const CAPTIONABLE = new Set<string>(['photo', 'video', 'animation', 'audio', 'document', 'voice']);
+/** Media that can be sent as one grouped album. */
+const GROUPABLE = new Set<string>(['photo', 'video', 'document', 'audio']);
+
+function fileIdOf(m: Message): string | undefined {
+  if (m.photo?.length) return m.photo[m.photo.length - 1]!.file_id; // largest size
+  return (m.animation ?? m.video ?? m.document ?? m.audio ?? m.voice ?? m.sticker ?? m.video_note)
+    ?.file_id;
+}
+
+const isForumChat = (chat: unknown): boolean =>
+  Boolean((chat as { is_forum?: boolean } | undefined)?.is_forum);
+
+/**
+ * Forum topic of a message: its thread for topic messages, General (1) for
+ * the rest of a forum. Reply threads in non-forum groups are NOT topics.
+ */
+function topicIdOf(m: Message): number | undefined {
+  if (!isForumChat(m.chat)) return undefined;
+  return m.is_topic_message && m.message_thread_id ? m.message_thread_id : GENERAL_TOPIC_ID;
+}
+
+/** Name of the topic, when this message carries it (Telegram doesn't always). */
+function topicTitleOf(m: Message, topicId: number): string {
+  if (topicId === GENERAL_TOPIC_ID) return 'General';
+  return (
+    m.forum_topic_created?.name ??
+    m.forum_topic_edited?.name ??
+    m.reply_to_message?.forum_topic_created?.name ??
+    ''
+  );
+}
+
+/** Thread parameter for sends: General needs none. */
+const threadParam = (topicId: number | null | undefined) =>
+  topicId && topicId !== GENERAL_TOPIC_ID ? { message_thread_id: topicId } : {};
+
+/** Normalize a Bot API message into the relay's message model. */
+export function toRelayMessage(m: Message): RelayMessage {
+  return {
+    topicId: topicIdOf(m),
+    chatId: String(m.chat.id),
+    messageId: m.message_id,
+    albumKey: m.media_group_id,
+    date: m.date,
+    media: mediaKindOf(m),
+    text: {
+      text: m.text ?? m.caption ?? '',
+      entities: fromBotEntities(m.entities ?? m.caption_entities),
+    },
+    hasButtons: Boolean(m.reply_markup),
+    fileId: fileIdOf(m),
+    hasSpoiler: m.has_media_spoiler || undefined,
+  };
 }
 
 const ALLOWED_UPDATES = [
@@ -138,6 +215,8 @@ export class BotApiTransport implements Transport {
   private readsAllGroupMessages = false;
   /** Chats already reported to discovery this process lifetime. */
   private knownChats = new Set<string>();
+  /** Forum topics already reported this process lifetime (chat:topic). */
+  private knownTopics = new Set<string>();
 
   constructor(
     readonly accountId: string,
@@ -149,7 +228,7 @@ export class BotApiTransport implements Transport {
   /** Reduce a chat + the bot's membership in it to what the dashboard needs. */
   private toDiscovered(
     chatType: ChatType,
-    chat: { id: number; title?: string; username?: string },
+    chat: { id: number; title?: string; username?: string; is_forum?: boolean },
     member: ChatMember,
   ): DiscoveredChat {
     const status = member.status === 'creator' ? 'administrator' : member.status;
@@ -172,7 +251,20 @@ export class BotApiTransport implements Transport {
       status,
       canRead,
       canPost,
+      isForum: Boolean(chat.is_forum),
     };
+  }
+
+  /** Report a forum topic the first time we see it, and whenever its name shows up. */
+  private noteTopic(handlers: ReaderHandlers, m: Message, topicId: number): void {
+    if (!handlers.onTopicSeen) return;
+    const key = `${m.chat.id}:${topicId}`;
+    const title = topicTitleOf(m, topicId);
+    if (this.knownTopics.has(key) && !title) return;
+    this.knownTopics.add(key);
+    void Promise.resolve(handlers.onTopicSeen(String(m.chat.id), topicId, title)).catch((err) =>
+      console.warn(`[bot:${this.username}] could not record topic ${key}: ${errorText(err)}`),
+    );
   }
 
   /** First message from a chat we haven't catalogued: look up our rights there. */
@@ -186,7 +278,7 @@ export class BotApiTransport implements Transport {
         if (!chatType) return;
         return handlers.onChatSeen?.(
           this.accountId,
-          this.toDiscovered(chatType, chat as { id: number; title?: string; username?: string }, member),
+          this.toDiscovered(chatType, chat as { id: number; title?: string; username?: string; is_forum?: boolean }, member),
           false,
         );
       })
@@ -194,21 +286,6 @@ export class BotApiTransport implements Transport {
         this.knownChats.delete(key); // try again on the next message
         console.warn(`[bot:${this.username}] could not describe chat ${key}: ${errorText(err)}`);
       });
-  }
-
-  private toRelayMessage(m: Message): RelayMessage {
-    return {
-      chatId: String(m.chat.id),
-      messageId: m.message_id,
-      albumKey: m.media_group_id,
-      date: m.date,
-      media: mediaKindOf(m),
-      text: {
-        text: m.text ?? m.caption ?? '',
-        entities: fromBotEntities(m.entities ?? m.caption_entities),
-      },
-      hasButtons: Boolean(m.reply_markup),
-    };
   }
 
   async start(handlers: ReaderHandlers): Promise<void> {
@@ -224,11 +301,13 @@ export class BotApiTransport implements Transport {
       }
       if (!chatTypeOf(m.chat.type)) return; // private chats with the bot are not relay traffic
       this.noteChat(handlers, m.chat.id);
+      const relay = toRelayMessage(m);
+      // topic created/renamed service messages are how topic names are learned
+      if (relay.topicId !== undefined) this.noteTopic(handlers, m, relay.topicId);
       // service messages, and a channel's automatic copy into its linked
       // discussion group (the channel post itself is the source of truth)
       if (isServiceMessage(m) || m.is_automatic_forward) return;
 
-      const relay = this.toRelayMessage(m);
       if (kind === 'post') void handlers.onPost(this.accountId, relay);
       else void handlers.onEdit(this.accountId, relay);
     };
@@ -246,7 +325,7 @@ export class BotApiTransport implements Transport {
         this.accountId,
         this.toDiscovered(
           chatType,
-          update.chat as { id: number; title?: string; username?: string },
+          update.chat as { id: number; title?: string; username?: string; is_forum?: boolean },
           update.new_chat_member,
         ),
         true,
@@ -287,31 +366,65 @@ export class BotApiTransport implements Transport {
     await this.runner?.catch(() => {});
   }
 
+  /**
+   * Copy a post as a fresh message (no "Forwarded from"). Everything is sent
+   * by Telegram-side reference — no download or re-upload — so large files,
+   * PDFs and videos cost the same as text.
+   * - text                 → sendMessage with the transformed text
+   * - album (photo/video/document/audio) → ONE sendMediaGroup, grouping kept
+   * - any other single post → copyMessage; caption only where Telegram allows
+   */
   async copy(opts: SendOptions): Promise<number[]> {
     try {
       const chatId = Number(opts.toChatId);
-      if (opts.mediaKind === 'text') {
+      const common = { disable_notification: opts.silent, ...threadParam(opts.topicId) };
+
+      if (opts.mediaKind === 'text' && opts.srcMessageIds.length === 1) {
         const res = await this.bot.api.sendMessage(chatId, opts.text.text, {
+          ...common,
           entities: toBotEntities(opts.text.entities) as never,
-          disable_notification: opts.silent,
           link_preview_options: { is_disabled: false },
         });
         return [res.message_id];
       }
 
+      const album = opts.items;
+      if (
+        album &&
+        album.length >= 2 &&
+        album.length === opts.srcMessageIds.length &&
+        album.every((item) => item.fileId && GROUPABLE.has(item.media))
+      ) {
+        return await this.sendAlbum(chatId, album, opts);
+      }
+
+      // Single posts, and the rare album we can't regroup: item by item.
       const fromChatId = Number(opts.fromChatId);
       const ids: number[] = [];
       for (const [i, srcId] of opts.srcMessageIds.entries()) {
-        const res = await this.bot.api.copyMessage(chatId, fromChatId, srcId, {
-          disable_notification: opts.silent,
-          ...(i === 0 && (opts.applyCaption ?? true)
-            ? {
-                caption: opts.text.text,
-                caption_entities: toBotEntities(opts.text.entities) as never,
-              }
-            : {}),
-        });
-        ids.push(res.message_id);
+        const kind = album?.[i]?.media ?? opts.mediaKind;
+        const withCaption = i === 0 && (opts.applyCaption ?? true) && CAPTIONABLE.has(kind);
+
+        if (withCaption && opts.text.text.length === 0) {
+          // the route's rules emptied the caption — make sure the original
+          // doesn't leak through (copyMessage keeps it when none is given)
+          const [res] = await this.bot.api.copyMessages(chatId, fromChatId, [srcId], {
+            ...common,
+            remove_caption: true,
+          });
+          ids.push(res!.message_id);
+        } else {
+          const res = await this.bot.api.copyMessage(chatId, fromChatId, srcId, {
+            ...common,
+            ...(withCaption
+              ? {
+                  caption: opts.text.text,
+                  caption_entities: toBotEntities(opts.text.entities) as never,
+                }
+              : {}),
+          });
+          ids.push(res.message_id);
+        }
         await opts.onSent?.(ids.slice());
       }
       return ids;
@@ -320,20 +433,51 @@ export class BotApiTransport implements Transport {
     }
   }
 
+  /** Re-send an album as one grouped message, transformed caption on item 1. */
+  private async sendAlbum(chatId: number, album: AlbumItem[], opts: SendOptions): Promise<number[]> {
+    const withCaption = (opts.applyCaption ?? true) && opts.text.text.length > 0;
+    const media = album.map((item, i) => ({
+      type: item.media,
+      media: item.fileId!,
+      ...(item.hasSpoiler && (item.media === 'photo' || item.media === 'video')
+        ? { has_spoiler: true }
+        : {}),
+      ...(i === 0 && withCaption
+        ? {
+            caption: opts.text.text,
+            caption_entities: toBotEntities(opts.text.entities),
+          }
+        : {}),
+    }));
+    const sent = await this.bot.api.sendMediaGroup(chatId, media as never, {
+      disable_notification: opts.silent,
+      ...threadParam(opts.topicId),
+    });
+    const ids = sent.map((m) => m.message_id);
+    await opts.onSent?.(ids.slice());
+    return ids;
+  }
+
+  /** Native forward ("Forwarded from" kept); albums stay grouped. */
   async forward(opts: Omit<SendOptions, 'text' | 'removeButtons'>): Promise<number[]> {
     try {
-      const ids: number[] = [];
-      for (const srcId of opts.srcMessageIds) {
-        const res = await this.bot.api.forwardMessage(
-          Number(opts.toChatId),
-          Number(opts.fromChatId),
-          srcId,
-          { disable_notification: opts.silent },
-        );
-        ids.push(res.message_id);
+      const toChatId = Number(opts.toChatId);
+      const fromChatId = Number(opts.fromChatId);
+      if (opts.srcMessageIds.length > 1) {
+        const sent = await this.bot.api.forwardMessages(toChatId, fromChatId, opts.srcMessageIds, {
+          disable_notification: opts.silent,
+          ...threadParam(opts.topicId),
+        });
+        const ids = sent.map((m) => m.message_id);
         await opts.onSent?.(ids.slice());
+        return ids;
       }
-      return ids;
+      const res = await this.bot.api.forwardMessage(toChatId, fromChatId, opts.srcMessageIds[0]!, {
+        disable_notification: opts.silent,
+        ...threadParam(opts.topicId),
+      });
+      await opts.onSent?.([res.message_id]);
+      return [res.message_id];
     } catch (err) {
       throw mapBotError(err);
     }
@@ -359,10 +503,10 @@ export class BotApiTransport implements Transport {
   }
 
   async deleteMessages(chatId: string, messageIds: number[]): Promise<void> {
+    if (messageIds.length === 0) return;
     try {
-      for (const id of messageIds) {
-        await this.bot.api.deleteMessage(Number(chatId), id);
-      }
+      // one call for a whole album; ids already gone are skipped by Telegram
+      await this.bot.api.deleteMessages(Number(chatId), messageIds);
     } catch (err) {
       throw mapBotError(err);
     }
@@ -411,6 +555,7 @@ export class BotApiTransport implements Transport {
         username: chat.username,
         isProtected: Boolean(chat.has_protected_content),
         chatType,
+        isForum: isForumChat(chat),
       };
     } catch (err) {
       if (err instanceof TransportError) throw err;

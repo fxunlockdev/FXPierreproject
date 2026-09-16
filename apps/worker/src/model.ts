@@ -40,6 +40,8 @@ export interface Channel {
   enabled: boolean;
   health: ChannelHealth;
   isProtected: boolean;
+  /** A group with Topics enabled */
+  isForum?: boolean;
 }
 
 export interface Membership {
@@ -67,6 +69,10 @@ export interface Route {
   syncEdits: boolean;
   syncDeletes: boolean;
   rules: RouteRules;
+  /** Relay only posts from this topic of a forum master (null = every topic). */
+  sourceTopicId?: number | null;
+  /** Post into this topic of a forum receiver (null = General). */
+  targetTopicId?: number | null;
 }
 
 export interface RelayConfig {

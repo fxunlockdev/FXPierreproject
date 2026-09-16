@@ -7,12 +7,19 @@ import {
 } from '@pierre/core';
 import type { Channel, ForwardRecord, NewForward, RelayConfig, Route } from './model';
 import type { Store } from './store/store';
-import { TransportError, type ReaderHandlers, type Transport } from './transport/transport';
+import {
+  TransportError,
+  type AlbumItem,
+  type ReaderHandlers,
+  type Transport,
+} from './transport/transport';
 
 export interface ForwardPayload {
   srcText: RichText;
   output: RichText;
   removeButtons: boolean;
+  /** Album items in order, so the album can be re-sent grouped */
+  items?: AlbumItem[];
 }
 
 export interface EngineOptions {
@@ -90,6 +97,10 @@ export class RelayEngine {
       this.store
         .upsertDiscoveredChat(accountId, chat)
         .catch((err) => console.error('[engine] could not record discovered chat:', err)),
+    onTopicSeen: (chatId, topicId, title) =>
+      this.store
+        .noteForumTopic(chatId, topicId, title)
+        .catch((err) => console.error('[engine] could not record forum topic:', err)),
     onChatMigrated: async (oldChatId, newChatId) => {
       try {
         await this.store.migrateChatId(oldChatId, newChatId);
@@ -186,6 +197,12 @@ export class RelayEngine {
     await this.inOrder(msg.chatId, () => this.processGroup([msg]));
   }
 
+  /** Does this post belong to the forum topic the route listens to? */
+  private static topicMatches(route: Route, msg: RelayMessage): boolean {
+    if (route.sourceTopicId == null) return true; // whole chat
+    return (msg.topicId ?? null) === route.sourceTopicId;
+  }
+
   /**
    * Run `work` after everything already queued for this master. With
    * immediate delivery, unordered processing could let "SL moved" overtake
@@ -268,6 +285,8 @@ export class RelayEngine {
     now: Date,
   ): Promise<void> {
     if (!route.enabled) return;
+    // a topic route ignores the rest of the forum — silently, no dropped rows
+    if (!RelayEngine.topicMatches(route, primary)) return;
     const receiver = this.channelsById.get(route.receiverId);
     if (!receiver || !receiver.enabled || !receiver.tgChatId) return;
 
@@ -294,6 +313,18 @@ export class RelayEngine {
       });
       return;
     }
+    // A text post the rules stripped bare (e.g. a message that was only a link)
+    // has nothing to send — Telegram rejects empty messages.
+    if (msgs.length === 1 && primary.media === 'text' && result.output.text.trim().length === 0) {
+      await this.store.upsertForward({
+        ...base,
+        state: 'dropped',
+        dropReason: "nothing left to send after this route's transforms",
+        deliverAt: now,
+        preview: primary.text.text.slice(0, 200),
+      });
+      return;
+    }
 
     const timing = resolveTiming(now, route.delaySeconds, route.schedule, route.pausedUntil);
     if (timing.action === 'drop') {
@@ -311,6 +342,16 @@ export class RelayEngine {
       srcText: primary.text,
       output: result.output,
       removeButtons: result.removeButtons,
+      ...(msgs.length > 1
+        ? {
+            items: msgs.map((m) => ({
+              messageId: m.messageId,
+              media: m.media,
+              fileId: m.fileId,
+              hasSpoiler: m.hasSpoiler,
+            })),
+          }
+        : {}),
     };
 
     await this.persistAndDeliver(
@@ -364,6 +405,7 @@ export class RelayEngine {
 
     for (const route of this.routesByMaster.get(master.id) ?? []) {
       if (!route.enabled || !route.syncEdits || route.mode !== 'copy') continue;
+      if (!RelayEngine.topicMatches(route, msg)) continue;
       const post = await this.store.findPost(route.id, msg.messageId);
       if (!post) continue;
 
@@ -393,6 +435,8 @@ export class RelayEngine {
 
       if (post.state !== 'done' || !post.destMessageIds?.length) continue;
       if (result.action === 'drop') continue; // edited into filtered content — leave the copy
+      // an edit that leaves a text post empty can't be applied — leave the copy
+      if (msg.media === 'text' && result.output.text.trim().length === 0) continue;
 
       const payload: ForwardPayload = {
         srcText: msg.text,
@@ -720,10 +764,13 @@ export class RelayEngine {
       }
     };
 
+    const items = payload?.items;
     const common = {
       toChatId: receiver.tgChatId!,
       silent: route.silent,
       mediaKind: f.mediaKind ?? 'text',
+      items: items && skip > 0 ? items.slice(skip) : items,
+      topicId: route.targetTopicId ?? null,
       onSent: checkpoint,
       // The transformed caption belongs to the album's first item; on a
       // resume that item is already out, so nothing gets re-captioned.
@@ -832,6 +879,17 @@ export class RelayEngine {
       if (isNew) {
         await this.store.notify('protected_content', 'Non-forwardable master', `${master.title} has protected content enabled.`, id);
       }
+      return;
+    }
+
+    // Telegram refused this one message (source deleted, unsupported content,
+    // quiz poll, paid media…). Fail it now; the route and receiver are fine.
+    if (e.code === 'rejected') {
+      await this.store.updateForward(f.id, {
+        state: 'failed',
+        attempts: f.attempts + 1,
+        lastError: `Telegram rejected this message: ${e.message}`,
+      });
       return;
     }
 

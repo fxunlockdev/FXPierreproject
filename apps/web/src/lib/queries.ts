@@ -11,6 +11,7 @@ import type {
   AuditRow,
   ChannelRow,
   DiscoveredChatRow,
+  ForumTopicRow,
   ForwardRow,
   IncidentRow,
   MemberRow,
@@ -34,6 +35,12 @@ export const useChannels = () =>
 
 export const useRoutes = () =>
   useQuery({ queryKey: ["routes"], queryFn: () => selectAll<RouteRow>("routes", "created_at", true) });
+
+export const useForumTopics = () =>
+  useQuery({
+    queryKey: ["forum_topics"],
+    queryFn: () => selectAll<ForumTopicRow>("forum_topics", "last_seen_at", false, 1000),
+  });
 
 export const useDiscoveredChats = () =>
   useQuery({

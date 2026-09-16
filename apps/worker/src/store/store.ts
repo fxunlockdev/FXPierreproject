@@ -68,6 +68,8 @@ export interface Store {
   upsertDiscoveredChat(accountId: string, chat: DiscoveredChat): Promise<void>;
   /** A basic group became a supergroup: repoint channels + discovery at the new id. */
   migrateChatId(oldChatId: string, newChatId: string): Promise<void>;
+  /** Record a forum topic ('' title never overwrites a known name). */
+  noteForumTopic(chatId: string, topicId: number, title: string): Promise<void>;
 
   setChannelHealth(channelId: string, health: ChannelHealth, error?: string): Promise<void>;
   setChannelLastMessage(channelId: string, at: Date): Promise<void>;

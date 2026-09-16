@@ -22,11 +22,23 @@ import {
   useAccounts,
   useChannels,
   useDeleteRoute,
+  useForumTopics,
   useInsertRoute,
   useRoutes,
   useUpdateRoute,
 } from "@/lib/queries";
-import type { ChannelRow, RouteRow } from "@/lib/types";
+import {
+  describeRouteTopics,
+  isForum,
+  sourceTopicToValue,
+  targetTopicToValue,
+  topicOptions,
+  valueToSourceTopic,
+  valueToTargetTopic,
+  ALL_TOPICS,
+  GENERAL_TOPIC_ID,
+} from "@/lib/topics";
+import type { ChannelRow, ForumTopicRow, RouteRow } from "@/lib/types";
 import { RouteEditor } from "./route-editor";
 
 function routeBadges(route: RouteRow) {
@@ -57,16 +69,19 @@ function RouteLine({
   route,
   receiver,
   master,
+  topics,
   onEdit,
 }: {
   route: RouteRow;
   receiver: ChannelRow;
   master: ChannelRow;
+  topics: ForumTopicRow[] | undefined;
   onEdit: () => void;
 }) {
   const update = useUpdateRoute();
   const remove = useDeleteRoute();
   const badges = routeBadges(route);
+  const topicSummary = describeRouteTopics(route, master, receiver, topics);
 
   return (
     <li className="group flex items-center gap-3 py-3">
@@ -89,6 +104,7 @@ function RouteLine({
           ))}
         </div>
         <p className="mt-0.5 truncate font-mono text-[11px] text-faint">
+          {topicSummary && <span className="text-mute">{topicSummary} · </span>}
           {receiver.username ? `@${receiver.username}` : "private"} · edits {route.sync_edits ? "on" : "off"} ·
           deletes {route.sync_deletes ? "on" : "off"}
         </p>
@@ -125,19 +141,28 @@ export default function RoutesPage() {
   const { data: routes, isLoading: loadingRoutes } = useRoutes();
   const { data: accounts } = useAccounts();
   const insert = useInsertRoute();
+  const { data: topics } = useForumTopics();
 
   const masters = useMemo(() => (channels ?? []).filter((c) => c.role === "master"), [channels]);
   const receivers = useMemo(() => (channels ?? []).filter((c) => c.role === "receiver"), [channels]);
   const [selectedMasterId, setSelectedMasterId] = useState<string | null>(null);
   const [linking, setLinking] = useState("");
+  const [linkSourceTopic, setLinkSourceTopic] = useState(ALL_TOPICS);
+  const [linkTargetTopic, setLinkTargetTopic] = useState(String(GENERAL_TOPIC_ID));
   const [editing, setEditing] = useState<RouteRow | null>(null);
 
   const activeMasterId = selectedMasterId ?? masters[0]?.id ?? null;
   const activeMaster = masters.find((m) => m.id === activeMasterId) ?? null;
   const masterRoutes = (routes ?? []).filter((r) => r.master_id === activeMasterId);
   const linkedReceiverIds = new Set(masterRoutes.map((r) => r.receiver_id));
-  const unlinked = receivers.filter((r) => !linkedReceiverIds.has(r.id));
+  const masterIsForum = isForum(activeMaster ?? undefined, topics);
+  // with topics, one pair can be linked several times (one link per topic mapping)
+  const unlinked = receivers.filter(
+    (r) => !linkedReceiverIds.has(r.id) || masterIsForum || isForum(r, topics),
+  );
   const channelById = new Map((channels ?? []).map((c) => [c.id, c]));
+  const linkingReceiver = linking ? channelById.get(linking) : undefined;
+  const receiverIsForum = isForum(linkingReceiver, topics);
 
   const loading = loadingChannels || loadingRoutes;
 
@@ -230,6 +255,7 @@ export default function RoutesPage() {
                           route={route}
                           receiver={receiver}
                           master={activeMaster}
+                          topics={topics}
                           onEdit={() => setEditing(route)}
                         />
                       );
@@ -247,6 +273,30 @@ export default function RoutesPage() {
                     options={unlinked.map((r) => ({ value: r.id, label: r.title }))}
                     className="min-w-56"
                   />
+                  {masterIsForum && (
+                    <Select
+                      aria-label="Relay posts from topic"
+                      value={linkSourceTopic}
+                      onValueChange={setLinkSourceTopic}
+                      options={topicOptions(activeMaster ?? undefined, topics, { includeAll: true }).map((o) => ({
+                        ...o,
+                        label: o.value === ALL_TOPICS ? "From: all topics" : `From: ${o.label}`,
+                      }))}
+                      className="min-w-44"
+                    />
+                  )}
+                  {receiverIsForum && (
+                    <Select
+                      aria-label="Post into topic"
+                      value={linkTargetTopic}
+                      onValueChange={setLinkTargetTopic}
+                      options={topicOptions(linkingReceiver, topics, { includeAll: false }).map((o) => ({
+                        ...o,
+                        label: `Into: ${o.label}`,
+                      }))}
+                      className="min-w-44"
+                    />
+                  )}
                   <Button
                     variant="primary"
                     size="sm"
@@ -254,12 +304,26 @@ export default function RoutesPage() {
                     loading={insert.isPending}
                     onClick={() => {
                       if (!activeMasterId || !linking) return;
+                      const source_topic_id = masterIsForum ? valueToSourceTopic(linkSourceTopic) : null;
+                      const target_topic_id = receiverIsForum ? valueToTargetTopic(linkTargetTopic) : null;
+                      const duplicate = masterRoutes.some(
+                        (r) =>
+                          r.receiver_id === linking &&
+                          r.source_topic_id === source_topic_id &&
+                          r.target_topic_id === target_topic_id,
+                      );
+                      if (duplicate) {
+                        toast.error("That exact link already exists — pick a different topic");
+                        return;
+                      }
                       insert.mutate(
-                        { master_id: activeMasterId, receiver_id: linking },
+                        { master_id: activeMasterId, receiver_id: linking, source_topic_id, target_topic_id },
                         {
                           onSuccess: () => {
                             toast.success("Receiver linked — forwarding is live");
                             setLinking("");
+                            setLinkSourceTopic(sourceTopicToValue(null));
+                            setLinkTargetTopic(targetTopicToValue(null));
                           },
                         },
                       );
