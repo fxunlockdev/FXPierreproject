@@ -16,8 +16,10 @@ describe('loadEnv', () => {
     expect(env.CONFIG_POLL_SECONDS).toBe(30);
   });
 
-  it('requires Telegram api credentials outside simulate mode', () => {
-    expect(() => loadEnv({ ...base, SIMULATE: '0' })).toThrow(/TELEGRAM_API_ID/);
+  it('boots bot-only (no Telegram api credentials) outside simulate mode', () => {
+    const env = loadEnv({ ...base, SIMULATE: '0' });
+    expect(env.TELEGRAM_API_ID).toBeUndefined();
+    expect(env.SIMULATE).toBe(false);
   });
 
   it('rejects a short encryption key with a readable message', () => {

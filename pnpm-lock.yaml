@@ -114,6 +114,9 @@ importers:
       telegram:
         specifier: ^2.26.16
         version: 2.26.22
+      tsx:
+        specifier: ^4.19.2
+        version: 4.23.13
       zod:
         specifier: ^3.24.1
         version: 3.25.76
@@ -124,9 +127,6 @@ importers:
       '@vitest/coverage-v8':
         specifier: '2'
         version: 2.1.9(vitest@2.1.9(@types/node@22.20.2)(lightningcss@1.32.0))
-      tsx:
-        specifier: ^4.19.2
-        version: 4.23.13
       typescript:
         specifier: ^5.7.2
         version: 5.9.3

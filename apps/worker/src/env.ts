@@ -28,9 +28,12 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
     throw new Error(`Worker environment is invalid:\n${issues}`);
   }
   if (!parsed.data.SIMULATE && (!parsed.data.TELEGRAM_API_ID || !parsed.data.TELEGRAM_API_HASH)) {
-    throw new Error(
-      'TELEGRAM_API_ID and TELEGRAM_API_HASH are required unless SIMULATE=1. ' +
-        'Get them from https://my.telegram.org → API development tools.',
+    // Bot-only deployments are fully supported — user-account features just
+    // stay off until the api credentials are added.
+    console.warn(
+      '[worker] TELEGRAM_API_ID / TELEGRAM_API_HASH are not set — running bot-only. ' +
+        'Connecting a user account will be unavailable until they are added ' +
+        '(https://my.telegram.org → API development tools).',
     );
   }
   return parsed.data;

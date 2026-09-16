@@ -18,12 +18,12 @@
     "fastify": "^5.2.0",
     "grammy": "^1.33.0",
     "telegram": "^2.26.16",
+    "tsx": "^4.19.2",
     "zod": "^3.24.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
     "@vitest/coverage-v8": "2",
-    "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vitest": "^2.1.9"
   }
