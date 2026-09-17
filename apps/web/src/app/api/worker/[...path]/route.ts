@@ -14,7 +14,7 @@ const ALLOWED = [
   /^login\/start$/,
   /^login\/[0-9a-f-]{36}$/,
   /^login\/[0-9a-f-]{36}\/(code|password)$/,
-  /^accounts\/bot$/,
+  /^accounts\/(bot|check)$/,
   /^channels\/(resolve|join)$/,
   /^topics\/add$/,
   /^forwards\/retry$/,

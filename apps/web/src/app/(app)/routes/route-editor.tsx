@@ -30,6 +30,7 @@ import {
   valueToSourceTopic,
   valueToTargetTopic,
 } from "@/lib/topics";
+import { AccountCheck } from "./account-check";
 import { AddTopicButton } from "./add-topic";
 import { useNow } from "@/lib/use-now";
 import type { AccountRow, ChannelRow, RouteRow } from "@/lib/types";
@@ -332,6 +333,15 @@ export function RouteEditor({
                   options={senderOptions}
                 />
               </Field>
+              {senderIsUser && state.sender_account_id && (
+                <div className="sm:col-span-2">
+                  <AccountCheck
+                    accountId={state.sender_account_id}
+                    receiver={receiver}
+                    topicId={receiverIsForum ? state.target_topic_id : null}
+                  />
+                </div>
+              )}
               {masterIsForum && (
                 <div className="flex flex-col gap-1.5">
                   <Field label="From topic" hint="Relay only posts made in this topic of the master.">

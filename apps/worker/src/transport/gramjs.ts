@@ -7,6 +7,7 @@ import type { Entity, MediaKind, RelayMessage, RichText } from '@pierre/core';
 import {
   GENERAL_TOPIC_ID,
   TransportError,
+  type AccessCheck,
   type ReaderHandlers,
   type ResolvedChannel,
   type SendOptions,
@@ -162,13 +163,23 @@ interface SendTarget {
 }
 
 const TARGET_TTL_MS = 10 * 60_000;
+/** A chat joined after startup is picked up by reloading the dialog list, at most this often. */
+const DIALOGS_REFRESH_MS = 60_000;
+
+export const NOT_IN_CHAT =
+  "this Telegram account isn't in that chat (or was removed) — add it there, then use “Check this account” on the route";
+
+/** Telegram's ways of saying "this account can't reach that chat". */
+const UNREACHABLE = /PEER_ID_INVALID|CHANNEL_INVALID|CHANNEL_PRIVATE|CHAT_ID_INVALID|USER_NOT_PARTICIPANT/;
 
 /** MTProto user-account transport. Reads any channel the account is in. */
 export class GramJsTransport implements Transport {
   readonly kind = 'user' as const;
   client: TelegramClient;
   private targets = new Map<string, SendTarget>();
-  private dialogsLoaded = false;
+  /** marked chat id → input peer, from the account's own dialog list */
+  private dialogPeers = new Map<string, Api.TypeInputPeer>();
+  private dialogsAt = 0;
 
   constructor(
     readonly accountId: string,
@@ -195,22 +206,56 @@ export class GramJsTransport implements Transport {
     };
   }
 
-  /** Access hashes live in the dialog list; a fresh session has none cached. */
+  /**
+   * The account's chats, with access hashes. Kept separately from GramJS's
+   * entity cache, which never replaces an entry once stored — a stale or
+   * "forbidden" copy there would otherwise stick until restart.
+   */
   private async loadDialogs(): Promise<void> {
-    await this.client.getDialogs({ limit: 500 });
-    this.dialogsLoaded = true;
+    const dialogs = await this.client.getDialogs({ limit: 500 });
+    const peers = new Map<string, Api.TypeInputPeer>();
+    for (const d of dialogs) {
+      const entity = d.entity;
+      // removed/banned chats still appear in dialogs, but can't be posted to
+      if (!entity || entity instanceof Api.ChannelForbidden || entity instanceof Api.ChatForbidden) continue;
+      try {
+        peers.set(utils.getPeerId(entity).toString(), utils.getInputPeer(entity));
+      } catch {
+        // entities without a usable access hash can't be addressed
+      }
+    }
+    this.dialogPeers = peers;
+    this.dialogsAt = Date.now();
   }
 
-  /** Chat ids arrive as strings ("-100…"), which GramJS would read as phone numbers. */
   private async peer(chatId: string): Promise<Api.TypeInputPeer> {
-    const ref = /^-?\d+$/.test(chatId) ? helpers.returnBigInt(chatId) : chatId;
-    try {
-      return await this.client.getInputEntity(ref);
-    } catch (err) {
-      if (this.dialogsLoaded) throw err;
+    if (!/^-?\d+$/.test(chatId)) return this.client.getInputEntity(chatId);
+    const known = this.dialogPeers.get(chatId);
+    if (known) return known;
+    if (Date.now() - this.dialogsAt > DIALOGS_REFRESH_MS) {
       await this.loadDialogs();
-      return this.client.getInputEntity(ref);
+      const fresh = this.dialogPeers.get(chatId);
+      if (fresh) return fresh;
     }
+    throw new TransportError('not_found', NOT_IN_CHAT);
+  }
+
+  /** Drop everything cached about a chat, so the next send looks again. */
+  private forget(chatId: string): void {
+    this.targets.delete(chatId);
+    this.dialogPeers.delete(chatId);
+    this.dialogsAt = 0;
+  }
+
+  /** A send failed: make Telegram's code readable, and look the chat up afresh next time. */
+  private sendFailure(chatId: string, err: unknown): TransportError {
+    const mapped = mapGramError(err);
+    this.targets.delete(chatId);
+    if (UNREACHABLE.test(mapped.message)) {
+      this.forget(chatId);
+      return new TransportError('not_found', `${NOT_IN_CHAT} (${mapped.message})`);
+    }
+    return mapped;
   }
 
   /**
@@ -228,7 +273,10 @@ export class GramJsTransport implements Transport {
     if (peer instanceof Api.InputPeerChannel) {
       const entity = await this.client.getEntity(peer);
       if (entity instanceof Api.Channel && entity.megagroup) {
-        const options = await this.client.invoke(new Api.channels.GetSendAs({ peer }));
+        const options = await this.client.invoke(new Api.channels.GetSendAs({ peer })).catch((err: unknown) => {
+          const mapped = mapGramError(err);
+          throw new TransportError(mapped.code, `checking whether this account can post as the group: ${mapped.message}`);
+        });
         const asGroup = options.peers.some(
           (p) => p.peer instanceof Api.PeerChannel && p.peer.channelId.equals(peer.channelId),
         );
@@ -244,7 +292,13 @@ export class GramJsTransport implements Transport {
 
   /** The source post's media, as references Telegram can re-send without a re-upload. */
   private async sourceMedia(chatId: string, ids: number[]): Promise<Api.TypeInputMedia[]> {
-    const msgs = await this.client.getMessages(await this.peer(chatId), { ids });
+    const source = await this.peer(chatId).catch(() => {
+      throw new TransportError(
+        'rejected',
+        "this Telegram account isn't in the master channel — join it with the account so photos and files can be copied",
+      );
+    });
+    const msgs = await this.client.getMessages(source, { ids });
     return msgs.flatMap((m) => {
       if (!m?.media || m.media instanceof Api.MessageMediaWebPage) return [];
       try {
@@ -351,8 +405,7 @@ export class GramJsTransport implements Transport {
     } catch (err) {
       if (err instanceof TransportError) throw err;
       // rights may have changed (e.g. "Remain anonymous" switched off): look again next time
-      this.targets.delete(opts.toChatId);
-      throw mapGramError(err);
+      throw this.sendFailure(opts.toChatId, err);
     }
   }
 
@@ -376,8 +429,7 @@ export class GramJsTransport implements Transport {
       return ids;
     } catch (err) {
       if (err instanceof TransportError) throw err;
-      this.targets.delete(opts.toChatId);
-      throw mapGramError(err);
+      throw this.sendFailure(opts.toChatId, err);
     }
   }
 
@@ -467,6 +519,106 @@ export class GramJsTransport implements Transport {
       }
       throw mapGramError(err);
     }
+  }
+
+  async checkAccess(chatId: string, topicId?: number | null): Promise<AccessCheck[]> {
+    const checks: AccessCheck[] = [];
+    this.forget(chatId); // a fresh look, not the cached decision
+
+    let peer: Api.TypeInputPeer;
+    try {
+      peer = await this.peer(chatId);
+    } catch {
+      checks.push({
+        label: 'The account is in this chat',
+        ok: false,
+        detail: "Not among the account's chats. Add the account to the group (or join the channel) with Telegram, then check again.",
+      });
+      return checks;
+    }
+    checks.push({ label: 'The account is in this chat', ok: true });
+
+    if (peer instanceof Api.InputPeerChat) {
+      checks.push({
+        label: 'Group can post anonymously',
+        ok: false,
+        detail: 'This is a basic group. Making the account an admin with Remain Anonymous upgrades it; do that, then check again.',
+      });
+      return checks;
+    }
+    if (!(peer instanceof Api.InputPeerChannel)) {
+      checks.push({ label: 'This is a group or channel', ok: false });
+      return checks;
+    }
+
+    try {
+      const entity = await this.client.getEntity(peer);
+      const isGroup = entity instanceof Api.Channel && Boolean(entity.megagroup);
+
+      let role: 'owner' | 'admin' | 'member' | 'restricted' | 'outside' = 'outside';
+      let rights: Api.TypeChatAdminRights | undefined;
+      try {
+        const res = await this.client.invoke(
+          new Api.channels.GetParticipant({ channel: peer, participant: new Api.InputPeerSelf() }),
+        );
+        const p = res.participant;
+        if (p instanceof Api.ChannelParticipantCreator) [role, rights] = ['owner', p.adminRights];
+        else if (p instanceof Api.ChannelParticipantAdmin) [role, rights] = ['admin', p.adminRights];
+        else if (p instanceof Api.ChannelParticipantBanned) role = 'restricted';
+        else if (p instanceof Api.ChannelParticipantLeft) role = 'outside';
+        else role = 'member';
+      } catch (err) {
+        if (!/USER_NOT_PARTICIPANT/.test(mapGramError(err).message)) throw err;
+      }
+      const isAdmin = role === 'owner' || role === 'admin';
+      const whyNotAdmin =
+        role === 'member'
+          ? "It's a member but not an admin. Make it an admin."
+          : role === 'restricted'
+            ? "It's restricted or removed in this chat."
+            : "It isn't a member. Add it, then make it an admin.";
+
+      if (!isGroup) {
+        checks.push({
+          label: 'Admin with Post Messages',
+          ok: isAdmin && (role === 'owner' || Boolean(rights?.postMessages)),
+          detail: isAdmin ? (rights?.postMessages || role === 'owner' ? undefined : 'Turn on Post Messages for it.') : whyNotAdmin,
+        });
+        return checks;
+      }
+
+      checks.push({ label: 'Admin in the group', ok: isAdmin, detail: isAdmin ? undefined : whyNotAdmin });
+      if (!isAdmin) return checks;
+      checks.push({
+        label: 'Remain Anonymous is on',
+        ok: Boolean(rights?.anonymous),
+        detail: rights?.anonymous
+          ? undefined
+          : "Edit this account's admin rights in the group and switch on Remain Anonymous.",
+      });
+
+      const options = await this.client.invoke(new Api.channels.GetSendAs({ peer }));
+      const asGroup = options.peers.some(
+        (o) => o.peer instanceof Api.PeerChannel && o.peer.channelId.equals(peer.channelId),
+      );
+      checks.push({
+        label: 'Posts will appear as the group',
+        ok: asGroup,
+        detail: asGroup ? undefined : 'Telegram does not offer the group as a sender for this account yet.',
+      });
+
+      if (topicId && topicId !== GENERAL_TOPIC_ID && entity instanceof Api.Channel && entity.forum) {
+        try {
+          const found = await this.checkTopic(chatId, topicId);
+          checks.push({ label: 'The topic exists', ok: true, detail: found.title });
+        } catch (err) {
+          checks.push({ label: 'The topic exists', ok: false, detail: err instanceof Error ? err.message : String(err) });
+        }
+      }
+    } catch (err) {
+      checks.push({ label: 'Telegram answered the check', ok: false, detail: mapGramError(err).message });
+    }
+    return checks;
   }
 
   async joinChannel(ref: string): Promise<ResolvedChannel> {

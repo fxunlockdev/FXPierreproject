@@ -1,6 +1,6 @@
 import { Api, helpers } from 'telegram';
 import { describe, expect, it, vi } from 'vitest';
-import { GramJsTransport, NOT_ANONYMOUS_ADMIN, sentIds, topicIdOf } from '../src/transport/gramjs';
+import { GramJsTransport, NOT_ANONYMOUS_ADMIN, NOT_IN_CHAT, sentIds, topicIdOf } from '../src/transport/gramjs';
 import type { SendOptions } from '../src/transport/transport';
 
 const big = (n: number | string) => helpers.returnBigInt(n);
@@ -11,39 +11,49 @@ const CHANNEL_ID = 1234567890;
 const CHANNEL = `-100${CHANNEL_ID}`;
 const MASTER = '-1004464666032';
 
-const inputChannel = (id: number) => new Api.InputPeerChannel({ channelId: big(id), accessHash: big(42) });
-
 const photo = (id: number) =>
   new Api.MessageMediaPhoto({
     photo: new Api.Photo({ id: big(id), accessHash: big(7), fileReference: Buffer.alloc(0), date: 0, sizes: [], dcId: 2 }),
   });
 
+const chat = (id: number, kind: 'group' | 'channel', forum = false) =>
+  new Api.Channel({
+    id: big(id),
+    accessHash: big(42),
+    title: kind === 'group' ? 'ICEBERG' : 'Channel',
+    photo: new Api.ChatPhotoEmpty(),
+    date: 0,
+    megagroup: kind === 'group',
+    broadcast: kind === 'channel',
+    forum,
+  });
+
+type Participant = 'anonymous-admin' | 'admin' | 'member' | 'outside';
+
 /**
  * A user-account transport whose MTProto calls are answered locally.
- * `anonymousIn` lists the groups where the account may post as the group.
+ * `anonymousIn` lists the groups where the account may post as the group;
+ * `dialogs` is what the account's chat list contains.
  */
-function userAccount(opts: { anonymousIn?: number[]; sourceMedia?: Api.TypeMessageMedia[] } = {}) {
+function userAccount(
+  opts: {
+    anonymousIn?: number[];
+    sourceMedia?: Api.TypeMessageMedia[];
+    dialogs?: (Api.Channel | Api.ChannelForbidden)[];
+    participant?: Participant;
+  } = {},
+) {
   const t = new GramJsTransport('acc-user', 1, 'hash', '');
   const requests: Api.AnyRequest[] = [];
   let nextId = 700;
   const client = t.client as unknown as Record<string, unknown>;
+  const state = {
+    dialogs: opts.dialogs ?? [chat(GROUP_ID, 'group', true), chat(CHANNEL_ID, 'channel'), chat(4464666032, 'channel')],
+  };
 
-  client['getInputEntity'] = vi.fn(async (ref: unknown) => {
-    const id = String(ref);
-    if (id === GROUP) return inputChannel(GROUP_ID);
-    if (id === CHANNEL) return inputChannel(CHANNEL_ID);
-    if (id === MASTER) return inputChannel(4464666032);
-    throw new Error(`unknown peer ${id}`);
-  });
+  client['getDialogs'] = vi.fn(async () => state.dialogs.map((entity) => ({ entity })));
   client['getEntity'] = vi.fn(async (peer: Api.InputPeerChannel) =>
-    new Api.Channel({
-      id: peer.channelId,
-      title: 'x',
-      photo: new Api.ChatPhotoEmpty(),
-      date: 0,
-      megagroup: peer.channelId.equals(big(GROUP_ID)),
-      broadcast: !peer.channelId.equals(big(GROUP_ID)),
-    }),
+    state.dialogs.find((d) => d.id.equals(peer.channelId)) ?? chat(Number(peer.channelId), 'channel'),
   );
   client['getMessages'] = vi.fn(async () => (opts.sourceMedia ?? []).map((media) => ({ media })));
   client['invoke'] = vi.fn(async (req: Api.AnyRequest) => {
@@ -60,6 +70,30 @@ function userAccount(opts: { anonymousIn?: number[]; sourceMedia?: Api.TypeMessa
         users: [],
       });
     }
+    if (req instanceof Api.channels.GetParticipant) {
+      const role = opts.participant ?? 'anonymous-admin';
+      if (role === 'outside') throw Object.assign(new Error('USER_NOT_PARTICIPANT'), { errorMessage: 'USER_NOT_PARTICIPANT' });
+      const participant =
+        role === 'member'
+          ? new Api.ChannelParticipantSelf({ userId: big(99), inviterId: big(1), date: 0 })
+          : new Api.ChannelParticipantAdmin({
+              userId: big(99),
+              promotedBy: big(1),
+              date: 0,
+              adminRights: new Api.ChatAdminRights({ anonymous: role === 'anonymous-admin', postMessages: true }),
+            });
+      return new Api.channels.ChannelParticipant({ participant, chats: [], users: [] });
+    }
+    if (req instanceof Api.channels.GetForumTopicsByID) {
+      return new Api.messages.ForumTopics({
+        count: 1,
+        topics: [new Api.ForumTopic({ id: 5, date: 0, title: 'GOLD Scalp', iconColor: 0, topMessage: 5, readInboxMaxId: 0, readOutboxMaxId: 0, unreadCount: 0, unreadMentionsCount: 0, unreadReactionsCount: 0, fromId: new Api.PeerUser({ userId: big(1) }), notifySettings: new Api.PeerNotifySettings({}) })],
+        messages: [],
+        chats: [],
+        users: [],
+        pts: 0,
+      });
+    }
     const randomIds =
       req instanceof Api.messages.SendMultiMedia
         ? req.multiMedia.map((m) => m.randomId)
@@ -74,8 +108,15 @@ function userAccount(opts: { anonymousIn?: number[]; sourceMedia?: Api.TypeMessa
       seq: 0,
     });
   });
-  const sends = () => requests.filter((r) => !(r instanceof Api.channels.GetSendAs));
-  return { t, requests, sends };
+  const sends = () =>
+    requests.filter(
+      (r) =>
+        r instanceof Api.messages.SendMessage ||
+        r instanceof Api.messages.SendMedia ||
+        r instanceof Api.messages.SendMultiMedia ||
+        r instanceof Api.messages.ForwardMessages,
+    );
+  return { t, requests, sends, state };
 }
 
 const send = (over: Partial<SendOptions>): SendOptions => ({
@@ -194,11 +235,111 @@ describe('user account posting into a group — appears as the group', () => {
     expect(req!.sendAs).toBeDefined();
   });
 
-  it('chat ids reach GramJS as numbers, never as strings it would read as phone numbers', async () => {
+});
+
+describe('user account — finding the chat, and recovering when it cannot', () => {
+  it('a chat the account is not in fails with a clear reason and nothing is sent', async () => {
+    const { t, sends } = userAccount({ anonymousIn: [GROUP_ID], dialogs: [chat(CHANNEL_ID, 'channel')] });
+    await expect(t.copy(send({}))).rejects.toMatchObject({ code: 'not_found', message: NOT_IN_CHAT });
+    expect(sends()).toHaveLength(0);
+  });
+
+  it('a group the account was removed from is not used, even though it still shows in its chat list', async () => {
+    const forbidden = new Api.ChannelForbidden({ id: big(GROUP_ID), accessHash: big(42), title: 'ICEBERG', megagroup: true });
+    const { t, sends } = userAccount({ anonymousIn: [GROUP_ID], dialogs: [forbidden] });
+    await expect(t.copy(send({}))).rejects.toMatchObject({ code: 'not_found' });
+    expect(sends()).toHaveLength(0);
+  });
+
+  it('a group joined after the relay started is found once the chat list is reloaded', async () => {
+    const { t, state, sends } = userAccount({ anonymousIn: [GROUP_ID], dialogs: [chat(CHANNEL_ID, 'channel')] });
+    const now = vi.spyOn(Date, 'now');
+    try {
+      now.mockReturnValue(1_000_000);
+      await expect(t.copy(send({}))).rejects.toMatchObject({ code: 'not_found' });
+
+      state.dialogs = [chat(CHANNEL_ID, 'channel'), chat(GROUP_ID, 'group', true)]; // added to the group
+      now.mockReturnValue(1_000_000 + 61_000);
+      await expect(t.copy(send({}))).resolves.toEqual([700]);
+      expect(sends()).toHaveLength(1);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('PEER_ID_INVALID on a send becomes a readable reason and forces a fresh lookup next time', async () => {
     const { t } = userAccount({ anonymousIn: [GROUP_ID] });
-    await t.copy(send({}));
-    const refs = (t.client.getInputEntity as unknown as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0]);
-    expect(refs.every((r) => typeof r !== 'string')).toBe(true);
+    const invoke = t.client.invoke as unknown as ReturnType<typeof vi.fn>;
+    const answer = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (req: Api.AnyRequest) => {
+      if (req instanceof Api.messages.SendMessage) {
+        throw Object.assign(new Error('PEER_ID_INVALID'), { errorMessage: 'PEER_ID_INVALID' });
+      }
+      return answer(req);
+    });
+    await expect(t.copy(send({}))).rejects.toMatchObject({ code: 'not_found' });
+    await expect(t.copy(send({}))).rejects.toThrow(/isn't in that chat.*PEER_ID_INVALID/);
+
+    const dialogs = t.client.getDialogs as unknown as ReturnType<typeof vi.fn>;
+    expect(dialogs.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('copying a photo from a master the account has not joined says to join it', async () => {
+    const { t } = userAccount({
+      anonymousIn: [GROUP_ID],
+      sourceMedia: [photo(1)],
+      dialogs: [chat(GROUP_ID, 'group', true)],
+    });
+    await expect(t.copy(send({ mediaKind: 'photo' }))).rejects.toMatchObject({ code: 'rejected' });
+    await expect(t.copy(send({ mediaKind: 'photo' }))).rejects.toThrow(/join it/);
+  });
+});
+
+describe('Check this account — what is missing, in plain words', () => {
+  const failing = (checks: { label: string; ok: boolean }[]) => checks.filter((c) => !c.ok).map((c) => c.label);
+
+  it('an anonymous admin passes every check, including the topic', async () => {
+    const { t, sends } = userAccount({ anonymousIn: [GROUP_ID] });
+    const checks = await t.checkAccess(GROUP, 5);
+    expect(failing(checks)).toEqual([]);
+    expect(checks.map((c) => c.label)).toEqual([
+      'The account is in this chat',
+      'Admin in the group',
+      'Remain Anonymous is on',
+      'Posts will appear as the group',
+      'The topic exists',
+    ]);
+    expect(sends()).toHaveLength(0); // checking never posts anything
+  });
+
+  it('an admin without Remain Anonymous is told exactly that', async () => {
+    const { t } = userAccount({ anonymousIn: [], participant: 'admin' });
+    const checks = await t.checkAccess(GROUP, null);
+    expect(failing(checks)).toEqual(['Remain Anonymous is on', 'Posts will appear as the group']);
+    expect(checks.find((c) => c.label === 'Remain Anonymous is on')!.detail).toMatch(/switch on Remain Anonymous/);
+  });
+
+  it('a plain member is told to make it an admin', async () => {
+    const { t } = userAccount({ participant: 'member' });
+    const checks = await t.checkAccess(GROUP, null);
+    expect(failing(checks)).toEqual(['Admin in the group']);
+    expect(checks[1]!.detail).toMatch(/not an admin/);
+  });
+
+  it('an account that is not in the group stops at the first check', async () => {
+    const { t } = userAccount({ dialogs: [chat(CHANNEL_ID, 'channel')] });
+    const checks = await t.checkAccess(GROUP, null);
+    expect(checks).toHaveLength(1);
+    expect(checks[0]).toMatchObject({ label: 'The account is in this chat', ok: false });
+  });
+
+  it('a channel only needs admin with Post Messages', async () => {
+    const { t } = userAccount({ participant: 'admin' });
+    const checks = await t.checkAccess(CHANNEL, null);
+    expect(checks.map((c) => [c.label, c.ok])).toEqual([
+      ['The account is in this chat', true],
+      ['Admin with Post Messages', true],
+    ]);
   });
 });
 

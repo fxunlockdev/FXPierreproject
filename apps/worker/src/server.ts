@@ -180,7 +180,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       .then(async () => {
         const me = await client.getMe();
         if (await admin.findTelegramIdentity('user', me.id.toString())) {
-          await client.disconnect();
+          await client.destroy(); // disconnect() would leave its update loop pinging forever
           throw new Error(IDENTITY_TAKEN);
         }
         const session = (client.session as StringSession).save();
@@ -194,7 +194,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
           status: 'connected',
         });
         await store.setSecret(accountId, encryptSecret(session, env.SESSION_ENCRYPTION_KEY));
-        await client.disconnect();
+        await client.destroy(); // disconnect() would leave its update loop pinging forever
         await deps.registerTransport(
           new GramJsTransport(accountId, env.TELEGRAM_API_ID!, env.TELEGRAM_API_HASH!, session),
         );
@@ -245,6 +245,35 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     pending.passwordResolve(password);
     pending.passwordResolve = undefined;
     return { ok: true };
+  });
+
+  /** Can this user account post into the chat, and as whom? Read-only: nothing is sent. */
+  app.post('/accounts/check', async (req, reply) => {
+    const body = z
+      .object({
+        accountId: z.string().uuid(),
+        channelId: z.string().uuid(),
+        topicId: z.number().int().positive().nullable().optional(),
+      })
+      .parse(req.body);
+    const spaceId = await requireSpace(req, reply);
+    if (!spaceId) return;
+    const account = engine.config.accounts.find((a) => a.id === body.accountId && a.spaceId === spaceId);
+    if (!account) return reply.code(404).send({ error: 'account not found' });
+    if (admin && (await admin.spaceOf('channels', body.channelId)) !== spaceId) {
+      return reply.code(404).send({ error: 'channel not found' });
+    }
+    let channel = engine.config.channels.find((c) => c.id === body.channelId);
+    if (!channel) {
+      await engine.reload();
+      channel = engine.config.channels.find((c) => c.id === body.channelId);
+    }
+    if (!channel?.tgChatId) return reply.code(409).send({ error: 'this chat has not been verified with Telegram yet' });
+    const transport = engine.transport(account.id);
+    if (!transport?.checkAccess) {
+      return reply.code(409).send({ error: 'this account is not connected to the relay right now' });
+    }
+    return { checks: await transport.checkAccess(channel.tgChatId, body.topicId ?? null) };
   });
 
   // ── bot accounts ──────────────────────────────────────────────────────────

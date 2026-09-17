@@ -127,4 +127,16 @@ export interface Transport {
    * name when Telegram reveals it. Throws 'rejected' when the topic is gone.
    */
   checkTopic?(chatId: string, topicId: number): Promise<{ title?: string }>;
+  /**
+   * Step by step: can this account post into the chat, and will posts appear
+   * under the chat's own name? Powers "Check this account" in the dashboard.
+   */
+  checkAccess?(chatId: string, topicId?: number | null): Promise<AccessCheck[]>;
+}
+
+export interface AccessCheck {
+  label: string;
+  ok: boolean;
+  /** What is wrong and how to fix it (or a useful fact when ok). */
+  detail?: string;
 }
