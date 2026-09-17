@@ -122,4 +122,9 @@ export interface Transport {
   history(chatId: string, sinceUnixSeconds: number): Promise<RelayMessage[]>;
   resolveChannel(ref: string): Promise<ResolvedChannel>;
   joinChannel(ref: string): Promise<ResolvedChannel>;
+  /**
+   * Confirm a forum topic exists and can be posted into; resolves with its
+   * name when Telegram reveals it. Throws 'rejected' when the topic is gone.
+   */
+  checkTopic?(chatId: string, topicId: number): Promise<{ title?: string }>;
 }

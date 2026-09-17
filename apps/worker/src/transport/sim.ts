@@ -149,7 +149,13 @@ export class SimTransport implements Transport {
       username: ref.startsWith('@') ? ref.slice(1) : undefined,
       isProtected: ref.includes('protected'),
       memberCount: 1234,
+      ...(ref.includes('forum') ? { chatType: 'supergroup' as const, isForum: true } : {}),
     };
+  }
+
+  async checkTopic(_chatId: string, topicId: number): Promise<{ title?: string }> {
+    if (topicId === 404) throw new TransportError('rejected', 'there is no topic with that link in this group');
+    return {};
   }
 
   async joinChannel(ref: string): Promise<ResolvedChannel> {

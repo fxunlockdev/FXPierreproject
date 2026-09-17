@@ -12,7 +12,8 @@ import type { Store } from './store/store';
 import { BotApiTransport } from './transport/botapi';
 import { GramJsTransport } from './transport/gramjs';
 import type { SimTransport } from './transport/sim';
-import { TransportError, type Transport } from './transport/transport';
+import { GENERAL_TOPIC_ID, TransportError, type Transport } from './transport/transport';
+import { parseTopicRef, type TopicRef } from './topics';
 
 export interface AdminOps {
   insertAccount(fields: {
@@ -384,6 +385,88 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       const e = err instanceof TransportError ? err : new TransportError('unknown', String(err));
       return reply.code(422).send({ error: e.message, code: e.code });
     }
+  });
+
+  // ── forum topics ──────────────────────────────────────────────────────────
+  // Bots learn a topic only when a message is posted in it; a topic that has
+  // been quiet since the bot joined is added here from its link instead.
+
+  /** Accounts of this space that can check topics — user accounts first, they also return names. */
+  const topicCheckers = (spaceId: string): Transport[] => {
+    const accounts = engine.config.accounts
+      .filter((a) => a.spaceId === spaceId && a.status === 'connected')
+      .sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'user' ? -1 : 1));
+    const transports = accounts
+      .map((a) => engine.transport(a.id))
+      .filter((t): t is Transport => Boolean(t?.checkTopic));
+    return transports.length > 0 || !sim ? transports : [sim];
+  };
+
+  app.post('/topics/add', async (req, reply) => {
+    const body = z
+      .object({
+        channelId: z.string().uuid(),
+        ref: z.string().min(1).max(300),
+        title: z.string().trim().max(128).optional(),
+      })
+      .parse(req.body);
+    const spaceId = await requireSpace(req, reply);
+    if (!spaceId) return;
+    if (admin && (await admin.spaceOf('channels', body.channelId)) !== spaceId) {
+      return reply.code(404).send({ error: 'channel not found' });
+    }
+
+    let channel = engine.config.channels.find((c) => c.id === body.channelId);
+    if (!channel) {
+      await engine.reload();
+      channel = engine.config.channels.find((c) => c.id === body.channelId);
+    }
+    const chatId = channel?.tgChatId;
+    if (!channel || !chatId) {
+      return reply.code(409).send({ error: 'this chat has not been verified with Telegram yet' });
+    }
+
+    let ref: TopicRef;
+    try {
+      ref = parseTopicRef(body.ref);
+    } catch (err) {
+      return reply.code(400).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+    const otherChat =
+      (ref.chatId !== undefined && ref.chatId !== chatId) ||
+      (ref.username !== undefined && ref.username.toLowerCase() !== (channel.username ?? '').toLowerCase());
+    if (otherChat) {
+      return reply.code(400).send({ error: `that link belongs to a different chat, not ${channel.title}` });
+    }
+
+    if (ref.topicId === GENERAL_TOPIC_ID) {
+      await store.noteForumTopic(spaceId, chatId, GENERAL_TOPIC_ID, 'General');
+      return { topicId: GENERAL_TOPIC_ID, title: 'General' };
+    }
+
+    const checkers = topicCheckers(spaceId);
+    if (checkers.length === 0) {
+      return reply.code(409).send({ error: 'connect a bot under Accounts first' });
+    }
+    let found: { title?: string } | null = null;
+    let lastError: TransportError | null = null;
+    for (const transport of checkers) {
+      try {
+        found = await transport.checkTopic!(chatId, ref.topicId);
+        break;
+      } catch (err) {
+        lastError = err instanceof TransportError ? err : new TransportError('unknown', String(err));
+        // the topic itself is missing or closed; another account can't change that
+        if (lastError.code === 'rejected') break;
+      }
+    }
+    if (!found) {
+      return reply.code(422).send({ error: lastError?.message ?? 'could not check that topic with Telegram' });
+    }
+
+    const title = found.title || body.title || '';
+    await store.noteForumTopic(spaceId, chatId, ref.topicId, title);
+    return { topicId: ref.topicId, title };
   });
 
   // ── queue actions & alerts ────────────────────────────────────────────────

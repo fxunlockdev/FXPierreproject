@@ -30,6 +30,7 @@ import {
   valueToSourceTopic,
   valueToTargetTopic,
 } from "@/lib/topics";
+import { AddTopicButton } from "./add-topic";
 import { useNow } from "@/lib/use-now";
 import type { AccountRow, ChannelRow, RouteRow } from "@/lib/types";
 
@@ -325,25 +326,36 @@ export function RouteEditor({
                 />
               </Field>
               {masterIsForum && (
-                <Field
-                  label="From topic"
-                  hint="Relay only posts made in this topic of the master. Topics appear here once someone posts in them."
-                >
-                  <Select
-                    value={sourceTopicToValue(state.source_topic_id)}
-                    onValueChange={(v) => set("source_topic_id", valueToSourceTopic(v))}
-                    options={topicOptions(master, topics, { includeAll: true })}
+                <div className="flex flex-col gap-1.5">
+                  <Field label="From topic" hint="Relay only posts made in this topic of the master.">
+                    <Select
+                      value={sourceTopicToValue(state.source_topic_id)}
+                      onValueChange={(v) => set("source_topic_id", valueToSourceTopic(v))}
+                      options={topicOptions(master, topics, { includeAll: true })}
+                    />
+                  </Field>
+                  <AddTopicButton
+                    channel={master}
+                    label="Topic missing? Add it by link"
+                    onAdded={(id) => set("source_topic_id", valueToSourceTopic(String(id)))}
                   />
-                </Field>
+                </div>
               )}
               {receiverIsForum && (
-                <Field label="Into topic" hint="Which topic of the receiver the posts land in.">
-                  <Select
-                    value={targetTopicToValue(state.target_topic_id)}
-                    onValueChange={(v) => set("target_topic_id", valueToTargetTopic(v))}
-                    options={topicOptions(receiver, topics, { includeAll: false })}
+                <div className="flex flex-col gap-1.5">
+                  <Field label="Into topic" hint="Which topic of the receiver the posts land in.">
+                    <Select
+                      value={targetTopicToValue(state.target_topic_id)}
+                      onValueChange={(v) => set("target_topic_id", valueToTargetTopic(v))}
+                      options={topicOptions(receiver, topics, { includeAll: false })}
+                    />
+                  </Field>
+                  <AddTopicButton
+                    channel={receiver}
+                    label="Topic missing? Add it by link"
+                    onAdded={(id) => set("target_topic_id", valueToTargetTopic(String(id)))}
                   />
-                </Field>
+                </div>
               )}
             </div>
             <SwitchRow

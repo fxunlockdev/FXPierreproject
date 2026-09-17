@@ -16,6 +16,7 @@ const ALLOWED = [
   /^login\/[0-9a-f-]{36}\/(code|password)$/,
   /^accounts\/bot$/,
   /^channels\/(resolve|join)$/,
+  /^topics\/add$/,
   /^forwards\/retry$/,
   /^alerts\/test$/,
 ];

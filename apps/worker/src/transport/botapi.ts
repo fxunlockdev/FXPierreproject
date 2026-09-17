@@ -601,6 +601,23 @@ export class BotApiTransport implements Transport {
     }
   }
 
+  async checkTopic(chatId: string, topicId: number): Promise<{ title?: string }> {
+    try {
+      // The Bot API can't look a topic up. A chat action aimed at the thread
+      // is the one call that fails for a missing topic without posting anything.
+      await this.bot.api.sendChatAction(Number(chatId), 'typing', { message_thread_id: topicId });
+      return {};
+    } catch (err) {
+      if (err instanceof GrammyError && /thread not found|TOPIC_ID_INVALID|TOPIC_DELETED/i.test(err.description)) {
+        throw new TransportError('rejected', 'there is no topic with that link in this group — copy the link from the topic itself');
+      }
+      if (err instanceof GrammyError && /TOPIC_CLOSED/i.test(err.description)) {
+        throw new TransportError('rejected', 'that topic is closed — reopen it in Telegram so posts can land there');
+      }
+      throw mapBotError(err);
+    }
+  }
+
   async joinChannel(): Promise<ResolvedChannel> {
     throw new TransportError(
       'forbidden',

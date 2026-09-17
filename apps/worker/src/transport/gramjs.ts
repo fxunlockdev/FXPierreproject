@@ -282,6 +282,28 @@ export class GramJsTransport implements Transport {
     }
   }
 
+  async checkTopic(chatId: string, topicId: number): Promise<{ title?: string }> {
+    try {
+      const res = await this.client.invoke(
+        new Api.channels.GetForumTopicsByID({ channel: chatId, topics: [topicId] }),
+      );
+      const topic = res.topics[0];
+      if (!(topic instanceof Api.ForumTopic)) {
+        throw new TransportError('rejected', 'there is no topic with that link in this group — copy the link from the topic itself');
+      }
+      if (topic.closed) {
+        throw new TransportError('rejected', 'that topic is closed — reopen it in Telegram so posts can land there');
+      }
+      return { title: topic.title };
+    } catch (err) {
+      if (err instanceof TransportError) throw err;
+      if (/TOPIC_ID_INVALID|TOPIC_DELETED/.test((err as { errorMessage?: string }).errorMessage ?? '')) {
+        throw new TransportError('rejected', 'there is no topic with that link in this group — copy the link from the topic itself');
+      }
+      throw mapGramError(err);
+    }
+  }
+
   async joinChannel(ref: string): Promise<ResolvedChannel> {
     try {
       const inviteHash = /(?:t(?:elegram)?\.me\/(?:\+|joinchat\/))([\w-]+)/.exec(ref)?.[1];

@@ -39,6 +39,7 @@ import {
   GENERAL_TOPIC_ID,
 } from "@/lib/topics";
 import type { ChannelRow, ForumTopicRow, RouteRow } from "@/lib/types";
+import { AddTopicButton } from "./add-topic";
 import { RouteEditor } from "./route-editor";
 
 function routeBadges(route: RouteRow) {
@@ -285,6 +286,13 @@ export default function RoutesPage() {
                       className="min-w-44"
                     />
                   )}
+                  {masterIsForum && activeMaster && (
+                    <AddTopicButton
+                      channel={activeMaster}
+                      label="Add master topic"
+                      onAdded={(id) => setLinkSourceTopic(String(id))}
+                    />
+                  )}
                   {receiverIsForum && (
                     <Select
                       aria-label="Post into topic"
@@ -295,6 +303,12 @@ export default function RoutesPage() {
                         label: `Into: ${o.label}`,
                       }))}
                       className="min-w-44"
+                    />
+                  )}
+                  {receiverIsForum && linkingReceiver && (
+                    <AddTopicButton
+                      channel={linkingReceiver}
+                      onAdded={(id) => setLinkTargetTopic(String(id))}
                     />
                   )}
                   <Button
