@@ -137,7 +137,7 @@ function ConnectUserDialog() {
       </DialogTrigger>
       <DialogContent
         title="Connect a Telegram account"
-        description="You type the code and password yourself — they go straight to the relay, never stored in the browser."
+        description="Use a dedicated account, not a personal one. You type the code and password yourself — they go straight to the relay, never stored in the browser. To post into a group as the group itself, make this account an admin there with “Remain anonymous” on."
       >
         {phase === "form" && (
           <form onSubmit={start} className="flex flex-col gap-4">
@@ -389,7 +389,7 @@ export default function AccountsPage() {
         <EmptyState
           icon={<UserCircle size={20} />}
           title="No Telegram accounts connected"
-          hint="Connect the dedicated relay user account first, then add a bot for fast sending and alerts."
+          hint="Add a bot for fast sending and alerts. Connect a dedicated Telegram account too if posts in a group must appear as the group itself."
         />
       ) : (
         <div className="grid gap-4 md:grid-cols-2">

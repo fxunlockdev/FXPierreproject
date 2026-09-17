@@ -682,11 +682,15 @@ export class RelayEngine {
     const pinned = connected(route.senderAccountId) ?? connected(opts.stickyAccountId);
     if (pinned) return pinned;
 
-    const eligible = this.cfg.accounts
+    const able = this.cfg.accounts
       .filter((a) => spaceOf(a) === space && a.isSender && a.status === 'connected' && this.transports.has(a.id))
       .filter((a) => this.canPostTo(a.id, receiver))
-      .filter((a) => !opts.needsSourceAccess || this.canAccess(a.id, master))
-      .map((a) => this.transports.get(a.id)!);
+      .filter((a) => !opts.needsSourceAccess || this.canAccess(a.id, master));
+    // Automatic sharing stays among bots: a user account posts under another
+    // identity (its own, or the group's), so it only sends when a route names
+    // it or no bot can.
+    const bots = able.filter((a) => a.kind === 'bot');
+    const eligible = (bots.length > 0 ? bots : able).map((a) => this.transports.get(a.id)!);
 
     if (eligible.length > 0) {
       const now = this.opts.clock().getTime();
@@ -703,12 +707,13 @@ export class RelayEngine {
       return ranked[0]!.t;
     }
 
-    // No rights known yet (e.g. just connected): any connected sender OF THIS SPACE, then the simulator.
-    for (const acc of this.cfg.accounts) {
-      if (spaceOf(acc) === space && acc.isSender && acc.status === 'connected') {
-        const t = this.transports.get(acc.id);
-        if (t) return t;
-      }
+    // No rights known yet (e.g. just connected): any connected sender OF THIS SPACE, bots first, then the simulator.
+    const fallback = this.cfg.accounts
+      .filter((acc) => spaceOf(acc) === space && acc.isSender && acc.status === 'connected')
+      .sort((a, b) => Number(b.kind === 'bot') - Number(a.kind === 'bot'));
+    for (const acc of fallback) {
+      const t = this.transports.get(acc.id);
+      if (t) return t;
     }
     return [...this.transports.values()].find((t) => t.kind === 'sim');
   }

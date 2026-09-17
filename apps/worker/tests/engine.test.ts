@@ -817,6 +817,30 @@ describe('RelayEngine — several bots share the sending load', () => {
     expect(b.sent).toHaveLength(0);
   });
 
+  it('a user account never joins automatic sharing while a bot can send — only a route that names it uses it', async () => {
+    const { a, b } = await twoBots();
+    const user = new SimTransport('user-acc');
+    store.config.accounts.push({
+      id: 'user-acc', kind: 'user', label: 'Anonymous admin', status: 'connected',
+      isReader: false, isSender: true, isAlertSender: false, maxMsgsPerMinute: 20,
+    });
+    store.config.chatAccess!.push(
+      { accountId: 'user-acc', tgChatId: MASTER_TG, canRead: true, canPost: true },
+      { accountId: 'user-acc', tgChatId: RECEIVER1_TG, canRead: true, canPost: true },
+    );
+    engine.registerTransport(user);
+    await engine.reload();
+
+    for (let i = 0; i < 4; i += 1) await a.injectPost(MASTER_TG, `auto ${i}`, { messageId: 600 + i });
+    expect(user.sent).toHaveLength(0);
+    expect(a.sent.length + b.sent.length).toBe(4);
+
+    store.config.routes = store.config.routes.map((r) => ({ ...r, senderAccountId: 'user-acc' }));
+    await engine.reload();
+    await a.injectPost(MASTER_TG, 'as the group', { messageId: 610 });
+    expect(user.sent.map((s) => s.text.text)).toEqual(['as the group']);
+  });
+
   it('media only goes through bots that are in the master (they copy from it)', async () => {
     const { a, b } = await twoBots({ bRights: { master: false, receiverPost: true } });
     await a.injectPost(MASTER_TG, 'text 1', { messageId: 500 }); // text needs no master access → a (tie)

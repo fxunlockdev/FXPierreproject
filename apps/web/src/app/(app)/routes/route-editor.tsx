@@ -277,8 +277,15 @@ export function RouteEditor({
     { value: "auto", label: "Automatic — share the load across bots" },
     ...accounts
       .filter((a) => a.is_sender)
-      .map((a) => ({ value: a.id, label: `${a.label} (${a.kind})` })),
+      .map((a) => ({ value: a.id, label: `${a.label} (${a.kind === "bot" ? "bot" : "Telegram account"})` })),
   ];
+  const senderIsUser = accounts.some((a) => a.id === state.sender_account_id && a.kind === "user");
+  const receiverIsGroup = receiver.chat_type === "supergroup" || receiver.chat_type === "group";
+  const senderHint = !senderIsUser
+    ? "Which account posts to the receiver."
+    : receiverIsGroup
+      ? `Posts appear as ${receiver.title} itself. This account must be an admin there with “Remain anonymous” on, and a member of ${master.title} — otherwise nothing is sent and Activity shows why.`
+      : `Posts appear as ${receiver.title}. This account must be an admin there and a member of ${master.title}.`;
 
   const keywordsToText = (list: string[]) => list.join("\n");
   const textToKeywords = (text: string) =>
@@ -318,7 +325,7 @@ export function RouteEditor({
                   ]}
                 />
               </Field>
-              <Field label="Sender" hint="Which account posts to the receiver.">
+              <Field label="Sender" hint={senderHint}>
                 <Select
                   value={state.sender_account_id ?? "auto"}
                   onValueChange={(v) => set("sender_account_id", v === "auto" ? null : v)}
