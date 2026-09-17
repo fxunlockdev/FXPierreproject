@@ -32,12 +32,10 @@ type Participant = 'anonymous-admin' | 'admin' | 'member' | 'outside';
 
 /**
  * A user-account transport whose MTProto calls are answered locally.
- * `anonymousIn` lists the groups where the account may post as the group;
- * `dialogs` is what the account's chat list contains.
+ * `participant` is what the account is in the group; `dialogs` is its chat list.
  */
 function userAccount(
   opts: {
-    anonymousIn?: number[];
     sourceMedia?: Api.TypeMessageMedia[];
     dialogs?: (Api.Channel | Api.ChannelForbidden)[];
     participant?: Participant;
@@ -47,8 +45,13 @@ function userAccount(
   const requests: Api.AnyRequest[] = [];
   let nextId = 700;
   const client = t.client as unknown as Record<string, unknown>;
-  const state = {
+  const state: {
+    dialogs: (Api.Channel | Api.ChannelForbidden)[];
+    /** Telegram's error for this request, when the test wants one. */
+    failWith: (req: Api.AnyRequest) => string | undefined;
+  } = {
     dialogs: opts.dialogs ?? [chat(GROUP_ID, 'group', true), chat(CHANNEL_ID, 'channel'), chat(4464666032, 'channel')],
+    failWith: () => undefined,
   };
 
   client['getDialogs'] = vi.fn(async () => state.dialogs.map((entity) => ({ entity })));
@@ -58,18 +61,8 @@ function userAccount(
   client['getMessages'] = vi.fn(async () => (opts.sourceMedia ?? []).map((media) => ({ media })));
   client['invoke'] = vi.fn(async (req: Api.AnyRequest) => {
     requests.push(req);
-    if (req instanceof Api.channels.GetSendAs) {
-      return new Api.channels.SendAsPeers({
-        peers: [
-          new Api.SendAsPeer({ peer: new Api.PeerUser({ userId: big(99) }) }),
-          ...(opts.anonymousIn ?? []).map(
-            (id) => new Api.SendAsPeer({ peer: new Api.PeerChannel({ channelId: big(id) }) }),
-          ),
-        ],
-        chats: [],
-        users: [],
-      });
-    }
+    const failure = state.failWith(req);
+    if (failure) throw Object.assign(new Error(failure), { errorMessage: failure });
     if (req instanceof Api.channels.GetParticipant) {
       const role = opts.participant ?? 'anonymous-admin';
       if (role === 'outside') throw Object.assign(new Error('USER_NOT_PARTICIPANT'), { errorMessage: 'USER_NOT_PARTICIPANT' });
@@ -132,7 +125,7 @@ const send = (over: Partial<SendOptions>): SendOptions => ({
 
 describe('user account posting into a group — appears as the group', () => {
   it('an anonymous admin posts as the group itself, into the chosen topic', async () => {
-    const { t, sends } = userAccount({ anonymousIn: [GROUP_ID] });
+    const { t, sends } = userAccount();
     const ids = await t.copy(send({ topicId: 5 }));
 
     expect(ids).toEqual([700]);
@@ -145,47 +138,59 @@ describe('user account posting into a group — appears as the group', () => {
   });
 
   it('General needs no topic reference', async () => {
-    const { t, sends } = userAccount({ anonymousIn: [GROUP_ID] });
+    const { t, sends } = userAccount();
     await t.copy(send({ topicId: 1 }));
     expect((sends()[0] as Api.messages.SendMessage).replyTo).toBeUndefined();
   });
 
   it('refuses rather than post under the account\'s own name when it is not an anonymous admin', async () => {
-    const { t, sends } = userAccount({ anonymousIn: [] });
+    const { t, sends } = userAccount({ participant: 'admin' });
     await expect(t.copy(send({}))).rejects.toMatchObject({ code: 'forbidden', message: NOT_ANONYMOUS_ADMIN });
     expect(sends()).toHaveLength(0);
   });
 
-  it('checks the group once, not on every post', async () => {
-    const { t, requests } = userAccount({ anonymousIn: [GROUP_ID] });
+  it("checks the group's rights once, not on every post", async () => {
+    const { t, requests } = userAccount();
     await t.copy(send({}));
     await t.copy(send({}));
-    expect(requests.filter((r) => r instanceof Api.channels.GetSendAs)).toHaveLength(1);
+    expect(requests.filter((r) => r instanceof Api.channels.GetParticipant)).toHaveLength(1);
   });
 
   it('after a failed send the group is checked again, so a revoked "Remain anonymous" is noticed at once', async () => {
-    const { t, requests } = userAccount({ anonymousIn: [GROUP_ID] });
+    const { t, requests, state } = userAccount();
     await t.copy(send({}));
-    const invoke = t.client.invoke as unknown as ReturnType<typeof vi.fn>;
-    const answer = invoke.getMockImplementation()!;
-    invoke.mockImplementationOnce(async () => {
-      throw Object.assign(new Error('SEND_AS_PEER_INVALID'), { errorMessage: 'SEND_AS_PEER_INVALID' });
-    });
-    await expect(t.copy(send({}))).rejects.toBeDefined();
-    invoke.mockImplementation(answer);
+
+    state.failWith = (req) => (req instanceof Api.messages.SendMessage ? 'PEER_ID_INVALID' : undefined);
+    await expect(t.copy(send({}))).rejects.toMatchObject({ code: 'not_found' });
+
+    state.failWith = () => undefined;
     await t.copy(send({}));
-    expect(requests.filter((r) => r instanceof Api.channels.GetSendAs)).toHaveLength(2);
+    expect(requests.filter((r) => r instanceof Api.channels.GetParticipant)).toHaveLength(2);
   });
 
   it('a broadcast channel needs no send-as: posts there always show the channel', async () => {
-    const { t, requests } = userAccount();
+    const { t, requests, sends } = userAccount();
     await t.copy(send({ toChatId: CHANNEL }));
-    expect(requests.some((r) => r instanceof Api.channels.GetSendAs)).toBe(false);
-    expect((requests[0] as Api.messages.SendMessage).sendAs).toBeUndefined();
+    expect(requests.some((r) => r instanceof Api.channels.GetParticipant)).toBe(false);
+    expect((sends()[0] as Api.messages.SendMessage).sendAs).toBeUndefined();
+  });
+
+  it('if Telegram refuses send-as, the post still goes out — once, under the group default', async () => {
+    const { t, sends, state } = userAccount();
+    state.failWith = (req) =>
+      req instanceof Api.messages.SendMessage && req.sendAs ? 'SEND_AS_PEER_INVALID' : undefined;
+
+    const ids = await t.copy(send({}));
+
+    expect(ids).toEqual([700]);
+    const attempts = sends() as Api.messages.SendMessage[];
+    expect(attempts.map((r) => Boolean(r.sendAs))).toEqual([true, false]);
+    // the same random id: a message that did land can never be sent twice
+    expect(attempts[0]!.randomId!.toString()).toBe(attempts[1]!.randomId!.toString());
   });
 
   it('a photo is re-sent by reference with the transformed caption', async () => {
-    const { t, sends } = userAccount({ anonymousIn: [GROUP_ID], sourceMedia: [photo(1)] });
+    const { t, sends } = userAccount({ sourceMedia: [photo(1)] });
     const ids = await t.copy(send({ mediaKind: 'photo' }));
 
     expect(ids).toEqual([700]);
@@ -197,7 +202,7 @@ describe('user account posting into a group — appears as the group', () => {
   });
 
   it('an album goes out as one grouped send, caption on the first item only', async () => {
-    const { t, sends } = userAccount({ anonymousIn: [GROUP_ID], sourceMedia: [photo(1), photo(2), photo(3)] });
+    const { t, sends } = userAccount({ sourceMedia: [photo(1), photo(2), photo(3)] });
     const checkpoints: number[][] = [];
     const ids = await t.copy(
       send({ mediaKind: 'photo', srcMessageIds: [10, 11, 12], topicId: 5, onSent: (so) => void checkpoints.push(so) }),
@@ -212,13 +217,13 @@ describe('user account posting into a group — appears as the group', () => {
   });
 
   it('an album resume carries no caption', async () => {
-    const { t, sends } = userAccount({ anonymousIn: [GROUP_ID], sourceMedia: [photo(2), photo(3)] });
+    const { t, sends } = userAccount({ sourceMedia: [photo(2), photo(3)] });
     await t.copy(send({ mediaKind: 'photo', srcMessageIds: [11, 12], applyCaption: false }));
     expect((sends()[0] as Api.messages.SendMultiMedia).multiMedia.map((m) => m.message)).toEqual(['', '']);
   });
 
   it('forward mode keeps the header, lands in the topic and posts as the group', async () => {
-    const { t, sends } = userAccount({ anonymousIn: [GROUP_ID] });
+    const { t, sends } = userAccount();
     const ids = await t.forward({
       fromChatId: MASTER,
       toChatId: GROUP,
@@ -239,20 +244,20 @@ describe('user account posting into a group — appears as the group', () => {
 
 describe('user account — finding the chat, and recovering when it cannot', () => {
   it('a chat the account is not in fails with a clear reason and nothing is sent', async () => {
-    const { t, sends } = userAccount({ anonymousIn: [GROUP_ID], dialogs: [chat(CHANNEL_ID, 'channel')] });
+    const { t, sends } = userAccount({ dialogs: [chat(CHANNEL_ID, 'channel')] });
     await expect(t.copy(send({}))).rejects.toMatchObject({ code: 'not_found', message: NOT_IN_CHAT });
     expect(sends()).toHaveLength(0);
   });
 
   it('a group the account was removed from is not used, even though it still shows in its chat list', async () => {
     const forbidden = new Api.ChannelForbidden({ id: big(GROUP_ID), accessHash: big(42), title: 'ICEBERG', megagroup: true });
-    const { t, sends } = userAccount({ anonymousIn: [GROUP_ID], dialogs: [forbidden] });
+    const { t, sends } = userAccount({ dialogs: [forbidden] });
     await expect(t.copy(send({}))).rejects.toMatchObject({ code: 'not_found' });
     expect(sends()).toHaveLength(0);
   });
 
   it('a group joined after the relay started is found once the chat list is reloaded', async () => {
-    const { t, state, sends } = userAccount({ anonymousIn: [GROUP_ID], dialogs: [chat(CHANNEL_ID, 'channel')] });
+    const { t, state, sends } = userAccount({ dialogs: [chat(CHANNEL_ID, 'channel')] });
     const now = vi.spyOn(Date, 'now');
     try {
       now.mockReturnValue(1_000_000);
@@ -268,15 +273,9 @@ describe('user account — finding the chat, and recovering when it cannot', () 
   });
 
   it('PEER_ID_INVALID on a send becomes a readable reason and forces a fresh lookup next time', async () => {
-    const { t } = userAccount({ anonymousIn: [GROUP_ID] });
-    const invoke = t.client.invoke as unknown as ReturnType<typeof vi.fn>;
-    const answer = invoke.getMockImplementation()!;
-    invoke.mockImplementation(async (req: Api.AnyRequest) => {
-      if (req instanceof Api.messages.SendMessage) {
-        throw Object.assign(new Error('PEER_ID_INVALID'), { errorMessage: 'PEER_ID_INVALID' });
-      }
-      return answer(req);
-    });
+    const { t, state } = userAccount();
+    state.failWith = (req) => (req instanceof Api.messages.SendMessage ? 'PEER_ID_INVALID' : undefined);
+
     await expect(t.copy(send({}))).rejects.toMatchObject({ code: 'not_found' });
     await expect(t.copy(send({}))).rejects.toThrow(/isn't in that chat.*PEER_ID_INVALID/);
 
@@ -286,7 +285,6 @@ describe('user account — finding the chat, and recovering when it cannot', () 
 
   it('copying a photo from a master the account has not joined says to join it', async () => {
     const { t } = userAccount({
-      anonymousIn: [GROUP_ID],
       sourceMedia: [photo(1)],
       dialogs: [chat(GROUP_ID, 'group', true)],
     });
@@ -299,23 +297,22 @@ describe('Check this account — what is missing, in plain words', () => {
   const failing = (checks: { label: string; ok: boolean }[]) => checks.filter((c) => !c.ok).map((c) => c.label);
 
   it('an anonymous admin passes every check, including the topic', async () => {
-    const { t, sends } = userAccount({ anonymousIn: [GROUP_ID] });
+    const { t, sends } = userAccount();
     const checks = await t.checkAccess(GROUP, 5);
     expect(failing(checks)).toEqual([]);
     expect(checks.map((c) => c.label)).toEqual([
       'The account is in this chat',
       'Admin in the group',
       'Remain Anonymous is on',
-      'Posts will appear as the group',
       'The topic exists',
     ]);
     expect(sends()).toHaveLength(0); // checking never posts anything
   });
 
   it('an admin without Remain Anonymous is told exactly that', async () => {
-    const { t } = userAccount({ anonymousIn: [], participant: 'admin' });
+    const { t } = userAccount({ participant: 'admin' });
     const checks = await t.checkAccess(GROUP, null);
-    expect(failing(checks)).toEqual(['Remain Anonymous is on', 'Posts will appear as the group']);
+    expect(failing(checks)).toEqual(['Remain Anonymous is on']);
     expect(checks.find((c) => c.label === 'Remain Anonymous is on')!.detail).toMatch(/switch on Remain Anonymous/);
   });
 

@@ -273,14 +273,11 @@ export class GramJsTransport implements Transport {
     if (peer instanceof Api.InputPeerChannel) {
       const entity = await this.client.getEntity(peer);
       if (entity instanceof Api.Channel && entity.megagroup) {
-        const options = await this.client.invoke(new Api.channels.GetSendAs({ peer })).catch((err: unknown) => {
-          const mapped = mapGramError(err);
-          throw new TransportError(mapped.code, `checking whether this account can post as the group: ${mapped.message}`);
-        });
-        const asGroup = options.peers.some(
-          (p) => p.peer instanceof Api.PeerChannel && p.peer.channelId.equals(peer.channelId),
-        );
-        if (!asGroup) throw new TransportError('forbidden', NOT_ANONYMOUS_ADMIN);
+        // An anonymous admin may only post on behalf of the group, and that is
+        // their default sender. (channels.getSendAs would say so too, but the
+        // GramJS copy of it is a layer behind and Telegram rejects it.)
+        const { rights } = await this.selfRights(peer);
+        if (!rights?.anonymous) throw new TransportError('forbidden', NOT_ANONYMOUS_ADMIN);
         sendAs = peer;
       }
       // broadcast channels: every post already appears as the channel
@@ -288,6 +285,48 @@ export class GramJsTransport implements Transport {
     const target = { peer, sendAs, at: Date.now() };
     this.targets.set(chatId, target);
     return target;
+  }
+
+  /** This account's standing in a chat: owner, admin (with rights), member, or outside it. */
+  private async selfRights(
+    peer: Api.TypeInputPeer,
+  ): Promise<{ role: 'owner' | 'admin' | 'member' | 'restricted' | 'outside'; rights?: Api.TypeChatAdminRights }> {
+    try {
+      const res = await this.client.invoke(
+        new Api.channels.GetParticipant({ channel: peer, participant: new Api.InputPeerSelf() }),
+      );
+      const p = res.participant;
+      if (p instanceof Api.ChannelParticipantCreator) return { role: 'owner', rights: p.adminRights };
+      if (p instanceof Api.ChannelParticipantAdmin) return { role: 'admin', rights: p.adminRights };
+      if (p instanceof Api.ChannelParticipantBanned) return { role: 'restricted' };
+      if (p instanceof Api.ChannelParticipantLeft) return { role: 'outside' };
+      return { role: 'member' };
+    } catch (err) {
+      if (/USER_NOT_PARTICIPANT/.test(mapGramError(err).message)) return { role: 'outside' };
+      throw err;
+    }
+  }
+
+  /**
+   * Send, naming the group as the sender. Should Telegram refuse that, send
+   * again without it: an anonymous admin posts as the group either way, and
+   * the random ids stay the same so a delivered message is never doubled.
+   */
+  private async sendAsGroup(
+    chatId: string,
+    sendAs: Api.TypeInputPeer | undefined,
+    build: (as?: Api.TypeInputPeer) => Api.AnyRequest,
+  ): Promise<Api.TypeUpdates> {
+    try {
+      return (await this.client.invoke(build(sendAs))) as Api.TypeUpdates;
+    } catch (err) {
+      const message = mapGramError(err).message;
+      if (!sendAs || !/SEND_AS_PEER_INVALID|PEER_ID_INVALID/.test(message)) throw err;
+      const cached = this.targets.get(chatId);
+      if (cached) this.targets.set(chatId, { ...cached, sendAs: undefined });
+      console.warn(`[user:${this.accountId}] Telegram refused send-as for ${chatId} (${message}) — sending plainly`);
+      return (await this.client.invoke(build(undefined))) as Api.TypeUpdates;
+    }
   }
 
   /** The source post's media, as references Telegram can re-send without a re-upload. */
@@ -349,57 +388,48 @@ export class GramJsTransport implements Transport {
       // on an album resume the caption already went out with the first item
       const caption = opts.applyCaption === false ? { text: '', entities: [] } : opts.text;
 
-      let ids: number[];
-      if (medias.length === 0) {
-        const randomId = helpers.generateRandomLong();
-        const res = await this.client.invoke(
-          new Api.messages.SendMessage({
+      const randomIds = (medias.length > 1 ? medias : [null]).map(() => helpers.generateRandomLong());
+      const build = (as?: Api.TypeInputPeer): Api.AnyRequest => {
+        if (medias.length === 0) {
+          return new Api.messages.SendMessage({
             peer,
             message: opts.text.text,
             entities: toApiEntities(opts.text.entities),
             silent: opts.silent,
             replyTo,
-            sendAs,
-            randomId,
-          }),
-        );
-        ids = sentIds(res, [randomId]);
-      } else if (medias.length === 1) {
-        const randomId = helpers.generateRandomLong();
-        const res = await this.client.invoke(
-          new Api.messages.SendMedia({
+            sendAs: as,
+            randomId: randomIds[0]!,
+          });
+        }
+        if (medias.length === 1) {
+          return new Api.messages.SendMedia({
             peer,
             media: medias[0]!,
             message: caption.text,
             entities: toApiEntities(caption.entities),
             silent: opts.silent,
             replyTo,
-            sendAs,
-            randomId,
-          }),
-        );
-        ids = sentIds(res, [randomId]);
-      } else {
-        const randomIds = medias.map(() => helpers.generateRandomLong());
-        const res = await this.client.invoke(
-          new Api.messages.SendMultiMedia({
-            peer,
-            multiMedia: medias.map(
-              (media, i) =>
-                new Api.InputSingleMedia({
-                  media,
-                  randomId: randomIds[i]!,
-                  message: i === 0 ? caption.text : '',
-                  entities: i === 0 ? toApiEntities(caption.entities) : undefined,
-                }),
-            ),
-            silent: opts.silent,
-            replyTo,
-            sendAs,
-          }),
-        );
-        ids = sentIds(res, randomIds);
-      }
+            sendAs: as,
+            randomId: randomIds[0]!,
+          });
+        }
+        return new Api.messages.SendMultiMedia({
+          peer,
+          multiMedia: medias.map(
+            (media, i) =>
+              new Api.InputSingleMedia({
+                media,
+                randomId: randomIds[i]!,
+                message: i === 0 ? caption.text : '',
+                entities: i === 0 ? toApiEntities(caption.entities) : undefined,
+              }),
+          ),
+          silent: opts.silent,
+          replyTo,
+          sendAs: as,
+        });
+      };
+      const ids = sentIds(await this.sendAsGroup(opts.toChatId, sendAs, build), randomIds);
       await opts.onSent?.(ids);
       return ids;
     } catch (err) {
@@ -413,16 +443,20 @@ export class GramJsTransport implements Transport {
     try {
       const { peer, sendAs } = await this.target(opts.toChatId);
       const randomIds = opts.srcMessageIds.map(() => helpers.generateRandomLong());
-      const res = await this.client.invoke(
-        new Api.messages.ForwardMessages({
-          fromPeer: await this.peer(opts.fromChatId),
-          id: opts.srcMessageIds,
-          randomId: randomIds,
-          toPeer: peer,
-          silent: opts.silent,
-          topMsgId: opts.topicId && opts.topicId !== GENERAL_TOPIC_ID ? opts.topicId : undefined,
-          sendAs,
-        }),
+      const fromPeer = await this.peer(opts.fromChatId);
+      const res = await this.sendAsGroup(
+        opts.toChatId,
+        sendAs,
+        (as) =>
+          new Api.messages.ForwardMessages({
+            fromPeer,
+            id: opts.srcMessageIds,
+            randomId: randomIds,
+            toPeer: peer,
+            silent: opts.silent,
+            topMsgId: opts.topicId && opts.topicId !== GENERAL_TOPIC_ID ? opts.topicId : undefined,
+            sendAs: as,
+          }),
       );
       const ids = sentIds(res, randomIds);
       await opts.onSent?.(ids);
@@ -555,21 +589,7 @@ export class GramJsTransport implements Transport {
       const entity = await this.client.getEntity(peer);
       const isGroup = entity instanceof Api.Channel && Boolean(entity.megagroup);
 
-      let role: 'owner' | 'admin' | 'member' | 'restricted' | 'outside' = 'outside';
-      let rights: Api.TypeChatAdminRights | undefined;
-      try {
-        const res = await this.client.invoke(
-          new Api.channels.GetParticipant({ channel: peer, participant: new Api.InputPeerSelf() }),
-        );
-        const p = res.participant;
-        if (p instanceof Api.ChannelParticipantCreator) [role, rights] = ['owner', p.adminRights];
-        else if (p instanceof Api.ChannelParticipantAdmin) [role, rights] = ['admin', p.adminRights];
-        else if (p instanceof Api.ChannelParticipantBanned) role = 'restricted';
-        else if (p instanceof Api.ChannelParticipantLeft) role = 'outside';
-        else role = 'member';
-      } catch (err) {
-        if (!/USER_NOT_PARTICIPANT/.test(mapGramError(err).message)) throw err;
-      }
+      const { role, rights } = await this.selfRights(peer);
       const isAdmin = role === 'owner' || role === 'admin';
       const whyNotAdmin =
         role === 'member'
@@ -593,18 +613,8 @@ export class GramJsTransport implements Transport {
         label: 'Remain Anonymous is on',
         ok: Boolean(rights?.anonymous),
         detail: rights?.anonymous
-          ? undefined
+          ? "Posts will appear under the group's own name."
           : "Edit this account's admin rights in the group and switch on Remain Anonymous.",
-      });
-
-      const options = await this.client.invoke(new Api.channels.GetSendAs({ peer }));
-      const asGroup = options.peers.some(
-        (o) => o.peer instanceof Api.PeerChannel && o.peer.channelId.equals(peer.channelId),
-      );
-      checks.push({
-        label: 'Posts will appear as the group',
-        ok: asGroup,
-        detail: asGroup ? undefined : 'Telegram does not offer the group as a sender for this account yet.',
       });
 
       if (topicId && topicId !== GENERAL_TOPIC_ID && entity instanceof Api.Channel && entity.forum) {
