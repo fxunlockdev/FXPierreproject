@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
-import { ArrowDown, ArrowUp, Flask, Plus, TrashSimple } from "@phosphor-icons/react";
+import { Flask, Plus, TrashSimple } from "@phosphor-icons/react";
 import {
   applyRules,
   parseRouteRules,
@@ -19,9 +19,8 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Field, Input, Textarea } from "@/components/ui/field";
 import { Select } from "@/components/ui/select";
-import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList } from "@/components/ui/tabs";
-import { useForumTopics, useUpdateRoute } from "@/lib/queries";
+import { usePresets, useForumTopics, useUpdateRoute } from "@/lib/queries";
 import {
   isForum,
   sourceTopicToValue,
@@ -31,12 +30,13 @@ import {
   valueToTargetTopic,
 } from "@/lib/topics";
 import { AccountCheck } from "./account-check";
+import { PresetPicker } from "./preset-picker";
+import { FilterFields, MEDIA_OPTIONS, SwitchRow, TransformFields } from "./rule-fields";
 import { AddTopicButton } from "./add-topic";
 import { useNow } from "@/lib/use-now";
 import type { AccountRow, ChannelRow, RouteRow } from "@/lib/types";
 
 const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const MEDIA_OPTIONS: MediaKind[] = ["text", "photo", "video", "animation", "document", "audio", "voice", "sticker", "poll"];
 
 const COMMON_TZ = [
   "UTC",
@@ -60,34 +60,11 @@ interface EditorState {
   sync_edits: boolean;
   sync_deletes: boolean;
   rules: RouteRules;
+  preset_id: string | null;
   scheduleEnabled: boolean;
   schedule: RouteSchedule;
   source_topic_id: number | null;
   target_topic_id: number | null;
-}
-
-function SwitchRow({
-  title,
-  hint,
-  checked,
-  onChange,
-  disabled,
-}: {
-  title: string;
-  hint: string;
-  checked: boolean;
-  onChange: (v: boolean) => void;
-  disabled?: boolean;
-}) {
-  return (
-    <div className="flex items-center justify-between gap-4 py-2.5">
-      <div className="min-w-0">
-        <p className="text-[13.5px] font-medium">{title}</p>
-        <p className="text-[12.5px] text-mute">{hint}</p>
-      </div>
-      <Switch checked={checked} onCheckedChange={onChange} label={title} disabled={disabled} />
-    </div>
-  );
 }
 
 /** Rich-text preview: renders bold/italic/code/link entities inline. */
@@ -232,6 +209,7 @@ export function RouteEditor({
       sync_edits: route.sync_edits,
       sync_deletes: route.sync_deletes,
       rules: parseRouteRules(route.rules),
+      preset_id: route.preset_id,
       scheduleEnabled: schedule !== null,
       schedule: schedule ?? { tz: "UTC", windows: [], offWindow: "hold" },
       source_topic_id: route.source_topic_id,
@@ -242,10 +220,11 @@ export function RouteEditor({
   const set = <K extends keyof EditorState>(key: K, value: EditorState[K]) =>
     setState((s) => ({ ...s, [key]: value }));
   const setRules = (patch: Partial<RouteRules>) => setState((s) => ({ ...s, rules: { ...s.rules, ...patch } }));
-  const setFilters = (patch: Partial<RouteRules["filters"]>) =>
-    setState((s) => ({ ...s, rules: { ...s.rules, filters: { ...s.rules.filters, ...patch } } }));
-  const setLinks = (patch: Partial<RouteRules["linkRemoval"]>) =>
-    setState((s) => ({ ...s, rules: { ...s.rules, linkRemoval: { ...s.rules.linkRemoval, ...patch } } }));
+  const { data: presets } = usePresets();
+  const preset = (presets ?? []).find((p) => p.id === state.preset_id);
+  const usesPreset = Boolean(preset);
+  // what this route actually runs on — the preset's rules when it follows one
+  const effectiveRules = preset ? parseRouteRules(preset.rules) : state.rules;
 
   const save = () => {
     update.mutate(
@@ -260,6 +239,7 @@ export function RouteEditor({
           sync_edits: state.sync_edits,
           sync_deletes: state.sync_deletes,
           rules: state.rules as unknown,
+          preset_id: state.preset_id,
           schedule: state.scheduleEnabled && state.schedule.windows.length > 0 ? (state.schedule as unknown) : null,
           source_topic_id: masterIsForum ? state.source_topic_id : null,
           target_topic_id: receiverIsForum ? state.target_topic_id : null,
@@ -288,13 +268,6 @@ export function RouteEditor({
       ? `Posts appear as ${receiver.title} itself. This account must be an admin there with “Remain anonymous” on, and a member of ${master.title} — otherwise nothing is sent and Activity shows why.`
       : `Posts appear as ${receiver.title}. This account must be an admin there and a member of ${master.title}.`;
 
-  const keywordsToText = (list: string[]) => list.join("\n");
-  const textToKeywords = (text: string) =>
-    text
-      .split("\n")
-      .map((s) => s.trim())
-      .filter(Boolean)
-      .slice(0, 100);
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
@@ -404,267 +377,33 @@ export function RouteEditor({
           </TabsContent>
 
           <TabsContent value="filters" className="flex flex-col gap-4">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <Field label="Must contain (one per line)" hint="Empty = everything passes.">
-                <Textarea
-                  rows={4}
-                  value={keywordsToText(state.rules.filters.includeKeywords)}
-                  onChange={(e) => setFilters({ includeKeywords: textToKeywords(e.target.value) })}
-                  placeholder={"EURUSD\nXAUUSD"}
-                />
-              </Field>
-              <Field label="Must NOT contain (one per line)">
-                <Textarea
-                  rows={4}
-                  value={keywordsToText(state.rules.filters.excludeKeywords)}
-                  onChange={(e) => setFilters({ excludeKeywords: textToKeywords(e.target.value) })}
-                  placeholder={"promo\ngiveaway"}
-                />
-              </Field>
-              <Field label="Required pattern (regex)" hint="Optional. e.g. TP\d">
-                <Input
-                  value={state.rules.filters.includeRegex ?? ""}
-                  onChange={(e) => setFilters({ includeRegex: e.target.value || undefined })}
-                  className="font-mono"
-                />
-              </Field>
-              <Field label="Blocked pattern (regex)">
-                <Input
-                  value={state.rules.filters.excludeRegex ?? ""}
-                  onChange={(e) => setFilters({ excludeRegex: e.target.value || undefined })}
-                  className="font-mono"
-                />
-              </Field>
-            </div>
-            <div className="flex flex-col divide-y divide-edge border-y border-edge">
-              <SwitchRow
-                title="Case sensitive"
-                hint="Match keyword capitalization exactly."
-                checked={state.rules.filters.caseSensitive}
-                onChange={(v) => setFilters({ caseSensitive: v })}
-              />
-              <SwitchRow
-                title="Whole words only"
-                hint='"buy" will not match "buyer".'
-                checked={state.rules.filters.wholeWord}
-                onChange={(v) => setFilters({ wholeWord: v })}
-              />
-            </div>
-            <Field label="Allowed media types" hint="Nothing selected = all types pass.">
-              <div className="flex flex-wrap gap-1.5">
-                {MEDIA_OPTIONS.map((m) => {
-                  const active = state.rules.filters.mediaTypes?.includes(m) ?? false;
-                  return (
-                    <button
-                      key={m}
-                      type="button"
-                      onClick={() => {
-                        const current = state.rules.filters.mediaTypes ?? [];
-                        const next = active ? current.filter((x) => x !== m) : [...current, m];
-                        setFilters({ mediaTypes: next.length > 0 ? next : undefined });
-                      }}
-                      className={`rounded-md border px-2.5 py-1 text-[12.5px] transition-colors ${
-                        active
-                          ? "border-live/40 bg-live-soft text-live"
-                          : "border-edge text-mute hover:border-edge-strong hover:text-ink"
-                      }`}
-                    >
-                      {m}
-                    </button>
-                  );
-                })}
-              </div>
-            </Field>
-            <div className="grid gap-4 sm:grid-cols-2">
-              <Field label="Min length (chars)">
-                <Input
-                  type="number"
-                  min={0}
-                  value={state.rules.filters.minLength ?? ""}
-                  onChange={(e) => setFilters({ minLength: e.target.value === "" ? undefined : Number(e.target.value) })}
-                />
-              </Field>
-              <Field label="Max length (chars)">
-                <Input
-                  type="number"
-                  min={0}
-                  value={state.rules.filters.maxLength ?? ""}
-                  onChange={(e) => setFilters({ maxLength: e.target.value === "" ? undefined : Number(e.target.value) })}
-                />
-              </Field>
-            </div>
+            <PresetPicker
+              presetId={state.preset_id}
+              onChange={(id) => set("preset_id", id)}
+              onDetach={(rules) => setState((st) => ({ ...st, preset_id: null, rules }))}
+            />
+            <FilterFields
+              key={`filters:${state.preset_id ?? "own"}`}
+              rules={effectiveRules}
+              onChange={setRules}
+              readOnly={usesPreset}
+            />
           </TabsContent>
 
           <TabsContent value="transforms" className="flex flex-col gap-5">
-            <div>
-              <p className="mb-2 text-[13px] font-medium text-mute">Find & replace (runs in order)</p>
-              <div className="flex flex-col gap-2">
-                {state.rules.replacements.map((r, i) => (
-                  <div key={i} className="flex items-center gap-2">
-                    <Input
-                      value={r.find}
-                      onChange={(e) => {
-                        const next = [...state.rules.replacements];
-                        next[i] = { ...r, find: e.target.value };
-                        setRules({ replacements: next });
-                      }}
-                      placeholder="find"
-                      className="flex-1 font-mono text-[13px]"
-                    />
-                    <span className="text-faint">→</span>
-                    <Input
-                      value={r.replace}
-                      onChange={(e) => {
-                        const next = [...state.rules.replacements];
-                        next[i] = { ...r, replace: e.target.value };
-                        setRules({ replacements: next });
-                      }}
-                      placeholder="replace with"
-                      className="flex-1 font-mono text-[13px]"
-                    />
-                    <button
-                      type="button"
-                      title="Regex"
-                      onClick={() => {
-                        const next = [...state.rules.replacements];
-                        next[i] = { ...r, regex: !r.regex };
-                        setRules({ replacements: next });
-                      }}
-                      className={`rounded-md border px-1.5 py-1 font-mono text-[11px] ${
-                        r.regex ? "border-live/40 bg-live-soft text-live" : "border-edge text-faint"
-                      }`}
-                    >
-                      .*
-                    </button>
-                    <div className="flex flex-col">
-                      <button
-                        type="button"
-                        aria-label="Move up"
-                        disabled={i === 0}
-                        onClick={() => {
-                          const next = [...state.rules.replacements];
-                          [next[i - 1], next[i]] = [next[i]!, next[i - 1]!];
-                          setRules({ replacements: next });
-                        }}
-                        className="text-faint hover:text-ink disabled:opacity-30"
-                      >
-                        <ArrowUp size={11} />
-                      </button>
-                      <button
-                        type="button"
-                        aria-label="Move down"
-                        disabled={i === state.rules.replacements.length - 1}
-                        onClick={() => {
-                          const next = [...state.rules.replacements];
-                          [next[i], next[i + 1]] = [next[i + 1]!, next[i]!];
-                          setRules({ replacements: next });
-                        }}
-                        className="text-faint hover:text-ink disabled:opacity-30"
-                      >
-                        <ArrowDown size={11} />
-                      </button>
-                    </div>
-                    <button
-                      type="button"
-                      aria-label="Remove rule"
-                      onClick={() => setRules({ replacements: state.rules.replacements.filter((_, x) => x !== i) })}
-                      className="rounded-md p-1.5 text-faint hover:bg-danger-soft hover:text-danger"
-                    >
-                      <TrashSimple size={14} />
-                    </button>
-                  </div>
-                ))}
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="self-start"
-                  onClick={() =>
-                    setRules({
-                      replacements: [
-                        ...state.rules.replacements,
-                        { find: "", replace: "", regex: false, caseSensitive: false },
-                      ],
-                    })
-                  }
-                >
-                  <Plus size={13} /> Add replacement
-                </Button>
-              </div>
-            </div>
-
-            <div className="border-t border-edge pt-4">
-              <p className="mb-2 text-[13px] font-medium text-mute">Link & mention removal</p>
-              <div className="grid gap-4 sm:grid-cols-2">
-                <Field label="URLs">
-                  <Select
-                    value={state.rules.linkRemoval.urls}
-                    onValueChange={(v) => setLinks({ urls: v as "off" | "tme" | "all" })}
-                    options={[
-                      { value: "off", label: "Keep all links" },
-                      { value: "tme", label: "Remove Telegram links only" },
-                      { value: "all", label: "Remove every link" },
-                    ]}
-                  />
-                </Field>
-                <Field label="Replace removed links with" hint="Leave empty to just delete them.">
-                  <Input
-                    value={state.rules.linkRemoval.placeholder}
-                    onChange={(e) => setLinks({ placeholder: e.target.value })}
-                    placeholder="[link removed]"
-                  />
-                </Field>
-              </div>
-              <div className="mt-2 flex flex-col divide-y divide-edge border-y border-edge">
-                <SwitchRow
-                  title="Strip @mentions"
-                  hint="Removes @usernames from the text."
-                  checked={state.rules.linkRemoval.mentions}
-                  onChange={(v) => setLinks({ mentions: v })}
-                />
-                <SwitchRow
-                  title="Strip #hashtags"
-                  hint="Removes hashtags from the text."
-                  checked={state.rules.linkRemoval.hashtags}
-                  onChange={(v) => setLinks({ hashtags: v })}
-                />
-                <SwitchRow
-                  title="Drop inline buttons"
-                  hint="Posts are delivered without the source's buttons."
-                  checked={state.rules.linkRemoval.buttons}
-                  onChange={(v) => setLinks({ buttons: v })}
-                />
-              </div>
-            </div>
-
-            <div className="grid gap-4 border-t border-edge pt-4 sm:grid-cols-2">
-              <Field
-                label="Header"
-                hint="Added above each post. **bold** __italic__ [link](url) {master} {date} {time} {link}"
-              >
-                <Textarea
-                  rows={2}
-                  value={state.rules.header}
-                  onChange={(e) => setRules({ header: e.target.value })}
-                  placeholder="**{master}**"
-                />
-              </Field>
-              <Field label="Footer" hint="Added below each post — same formatting and variables.">
-                <Textarea
-                  rows={2}
-                  value={state.rules.footer}
-                  onChange={(e) => setRules({ footer: e.target.value })}
-                  placeholder="__relayed {time}__"
-                />
-              </Field>
-            </div>
-            <Field label="Strip source signature (regex)" hint="Removes a matching block from the END of each post, e.g. — VIP Team.*">
-              <Input
-                value={state.rules.signatureStrip}
-                onChange={(e) => setRules({ signatureStrip: e.target.value })}
-                className="font-mono"
-              />
-            </Field>
+            <PresetPicker
+              presetId={state.preset_id}
+              onChange={(id) => set("preset_id", id)}
+              onDetach={(rules) => setState((st) => ({ ...st, preset_id: null, rules }))}
+            />
+            <TransformFields
+              key={`transforms:${state.preset_id ?? "own"}`}
+              rules={effectiveRules}
+              onChange={setRules}
+              readOnly={usesPreset}
+            />
           </TabsContent>
+
 
           <TabsContent value="schedule" className="flex flex-col gap-4">
             <Field label="Delay (seconds)" hint="Wait this long before every post. 0 = instant.">
@@ -802,7 +541,7 @@ export function RouteEditor({
           </TabsContent>
 
           <TabsContent value="test">
-            <TestTab state={state} masterTitle={master.title} />
+            <TestTab state={{ ...state, rules: effectiveRules }} masterTitle={master.title} />
           </TabsContent>
         </Tabs>
 

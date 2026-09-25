@@ -13,6 +13,7 @@ import {
   ListChecks,
   SignOut,
   ShieldStar,
+  Stack,
   SquaresFour,
   X,
 } from "@phosphor-icons/react";
@@ -26,6 +27,7 @@ import { useNow } from "@/lib/use-now";
 const NAV = [
   { href: "/overview", label: "Overview", icon: SquaresFour },
   { href: "/routes", label: "Routes", icon: Graph },
+  { href: "/presets", label: "Presets", icon: Stack },
   { href: "/channels", label: "Channels", icon: Broadcast },
   { href: "/accounts", label: "Accounts", icon: IdentificationBadge },
   { href: "/activity", label: "Activity", icon: ListChecks },

@@ -78,6 +78,16 @@ export interface ChannelRow {
   created_at: string;
 }
 
+/** A named set of rules any number of routes can follow. */
+export interface PresetRow {
+  id: string;
+  space_id: string;
+  name: string;
+  rules: unknown;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface RouteRow {
   id: string;
   master_id: string;
@@ -93,6 +103,8 @@ export interface RouteRow {
   sync_edits: boolean;
   sync_deletes: boolean;
   rules: unknown;
+  /** when set, the route runs the preset's rules instead of its own */
+  preset_id: string | null;
   /** forum master: relay only this topic (null = whole chat) */
   source_topic_id: number | null;
   /** forum receiver: post into this topic (null = General) */

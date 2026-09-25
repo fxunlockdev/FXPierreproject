@@ -73,6 +73,8 @@ export interface Route {
   syncEdits: boolean;
   syncDeletes: boolean;
   rules: RouteRules;
+  /** When set, the preset's rules are used instead of this route's own. */
+  presetId?: string | null;
   /** Relay only posts from this topic of a forum master (null = every topic). */
   sourceTopicId?: number | null;
   /** Post into this topic of a forum receiver (null = General). */
@@ -88,11 +90,20 @@ export interface ChatAccess {
   canPost: boolean;
 }
 
+/** A named set of rules several routes can share. */
+export interface Preset {
+  id: string;
+  spaceId?: string;
+  name: string;
+  rules: RouteRules;
+}
+
 export interface RelayConfig {
   accounts: Account[];
   channels: Channel[];
   memberships: Membership[];
   routes: Route[];
+  presets?: Preset[];
   /** Per-account rights in chats — lets several bots share the sending load. */
   chatAccess?: ChatAccess[];
 }

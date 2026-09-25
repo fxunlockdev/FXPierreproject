@@ -955,3 +955,74 @@ describe('RelayEngine — private spaces never mix', () => {
     expect(store.forwards.size).toBe(0);
   });
 });
+
+describe('RelayEngine — one rule preset, many routes', () => {
+  const blocklist = (words: string[]) =>
+    parseRouteRules({ filters: { excludeKeywords: words }, footer: 'via {master}' });
+
+  async function twoRoutesOnePreset(over: { presetId?: string | null; presetSpace?: string } = {}) {
+    nowMs = new Date('2026-09-15T10:00:00Z').getTime();
+    store = new MemoryStore();
+    store.config = baseConfig();
+    store.config.presets = [
+      {
+        id: 'preset-1',
+        spaceId: over.presetSpace ?? store.config.routes[0]!.spaceId,
+        name: 'House rules',
+        rules: blocklist(['scam', 'sign up']),
+      },
+    ];
+    // two receivers of the same master, both following the one preset
+    const presetId = 'presetId' in over ? over.presetId! : 'preset-1';
+    store.config.routes = [
+      { ...store.config.routes[0]!, presetId },
+      { ...store.config.routes[0]!, id: 'rt2', receiverId: 'r2', presetId },
+    ];
+    engine = new RelayEngine(store, { albumWaitMs: 15, clock, immediateDelivery: true });
+    const sim = new SimTransport('acc-sim');
+    engine.registerTransport(sim);
+    await engine.init();
+    await sim.start(engine.handlers);
+    return sim;
+  }
+
+  it('a post blocked by the preset reaches no route that uses it', async () => {
+    const sim = await twoRoutesOnePreset();
+    await sim.injectPost(MASTER_TG, 'free VIP, sign up now', { messageId: 900 });
+    await sim.injectPost(MASTER_TG, 'buy gold 2650', { messageId: 901 });
+
+    expect(sim.sent.map((s) => s.text.text)).toEqual([
+      'buy gold 2650\n\nvia Gold Signals',
+      'buy gold 2650\n\nvia Gold Signals',
+    ]);
+    const dropped = [...store.forwards.values()].filter((f) => f.state === 'dropped');
+    expect(dropped).toHaveLength(2); // one per route, each explaining itself
+    expect(dropped[0]!.dropReason).toMatch(/blocked keyword "sign up"/);
+  });
+
+  it('editing the preset changes every route that uses it, with no route edited', async () => {
+    const sim = await twoRoutesOnePreset();
+    store.config.presets![0]!.rules = blocklist(['gold']);
+    await engine.reload();
+
+    await sim.injectPost(MASTER_TG, 'sign up here', { messageId: 902 }); // no longer blocked
+    await sim.injectPost(MASTER_TG, 'buy gold 2650', { messageId: 903 }); // now blocked
+
+    expect(sim.sent.map((s) => s.text.text)).toEqual([
+      'sign up here\n\nvia Gold Signals',
+      'sign up here\n\nvia Gold Signals',
+    ]);
+  });
+
+  it('a route with no preset keeps its own rules', async () => {
+    const sim = await twoRoutesOnePreset({ presetId: null });
+    await sim.injectPost(MASTER_TG, 'free VIP, sign up now', { messageId: 904 });
+    expect(sim.sent).toHaveLength(2); // its own rules block nothing
+  });
+
+  it("another space's preset is ignored — the route falls back to its own rules", async () => {
+    const sim = await twoRoutesOnePreset({ presetSpace: 'space-elsewhere' });
+    await sim.injectPost(MASTER_TG, 'free VIP, sign up now', { messageId: 905 });
+    expect(sim.sent).toHaveLength(2);
+  });
+});

@@ -18,7 +18,14 @@ type Row = Record<string, unknown>;
 export type AlertSink = (kind: string, title: string, body: string, spaceId: string) => void;
 
 // discovered_chats: a bot added to / removed from a chat changes who can send there
-const CONFIG_TABLES = ['channels', 'routes', 'telegram_accounts', 'channel_memberships', 'discovered_chats'];
+const CONFIG_TABLES = [
+  'channels',
+  'routes',
+  'presets',
+  'telegram_accounts',
+  'channel_memberships',
+  'discovered_chats',
+];
 
 export class SupabaseStore implements Store {
   private sb: SupabaseClient;
@@ -39,7 +46,7 @@ export class SupabaseStore implements Store {
   }
 
   async loadConfig(): Promise<RelayConfig> {
-    const [spaces, accounts, channels, memberships, routes, access] = await Promise.all([
+    const [spaces, accounts, channels, memberships, routes, presets, access] = await Promise.all([
       // disabled spaces relay nothing: their rows never enter the config
       this.sb.from('spaces').select('id').is('disabled_at', null),
       // deterministic order — Postgres heap order shifts as rows are updated
@@ -47,6 +54,7 @@ export class SupabaseStore implements Store {
       this.sb.from('channels').select('*').order('created_at'),
       this.sb.from('channel_memberships').select('*'),
       this.sb.from('routes').select('*').order('created_at'),
+      this.sb.from('presets').select('*').order('name'),
       this.sb
         .from('discovered_chats')
         .select('space_id, account_id, tg_chat_id, can_read, can_post')
@@ -56,6 +64,7 @@ export class SupabaseStore implements Store {
     this.fail('channels', channels.error);
     this.fail('memberships', memberships.error);
     this.fail('routes', routes.error);
+    this.fail('presets', presets.error);
     this.fail('discovered_chats', access.error);
     this.fail('spaces', spaces.error);
 
@@ -117,8 +126,17 @@ export class SupabaseStore implements Store {
         syncDeletes: r['sync_deletes'] as boolean,
         sourceTopicId: r['source_topic_id'] == null ? null : Number(r['source_topic_id']),
         targetTopicId: r['target_topic_id'] == null ? null : Number(r['target_topic_id']),
+        presetId: (r['preset_id'] as string) ?? null,
         rules: parseRouteRules(r['rules'], (detail) =>
           console.warn(`[store] route ${r['id']} has invalid rules (defaults used): ${detail}`),
+        ),
+      })),
+      presets: (presets.data ?? []).filter(live).map((r: Row) => ({
+        id: r['id'] as string,
+        spaceId: r['space_id'] as string,
+        name: r['name'] as string,
+        rules: parseRouteRules(r['rules'], (detail) =>
+          console.warn(`[store] preset ${r['name']} has invalid rules (defaults used): ${detail}`),
         ),
       })),
       chatAccess: (access.data ?? []).filter(live).map((r: Row) => ({

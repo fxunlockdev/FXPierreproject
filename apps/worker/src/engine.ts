@@ -4,6 +4,7 @@ import {
   type PipelineContext,
   type RelayMessage,
   type RichText,
+  type RouteRules,
 } from '@pierre/core';
 import type { Account, Channel, ForwardRecord, NewForward, RelayConfig, Route } from './model';
 import type { Store } from './store/store';
@@ -359,7 +360,7 @@ export class RelayEngine {
       mediaKind: primary.media,
     };
 
-    const result = applyRules(primary, route.rules, this.contextFor(master, primary, route));
+    const result = applyRules(primary, this.rulesFor(route), this.contextFor(master, primary, route));
     if (result.action === 'drop') {
       await this.store.upsertForward({
         ...base,
@@ -467,7 +468,7 @@ export class RelayEngine {
       const post = await this.store.findPost(route.id, msg.messageId);
       if (!post) continue;
 
-      const result = applyRules(msg, route.rules, this.contextFor(master, msg, route));
+      const result = applyRules(msg, this.rulesFor(route), this.contextFor(master, msg, route));
 
       // The post hasn't reached the receiver yet (delay, schedule, retry
       // backoff, in flight): refresh it in place so the edited content is
@@ -716,6 +717,18 @@ export class RelayEngine {
       if (t) return t;
     }
     return [...this.transports.values()].find((t) => t.kind === 'sim');
+  }
+
+  /**
+   * Rules a route runs on: its preset's when it uses one (edit the preset,
+   * every linked route follows), otherwise its own. A preset from another
+   * space is never applied.
+   */
+  private rulesFor(route: Route): RouteRules {
+    if (!route.presetId) return route.rules;
+    const preset = (this.cfg.presets ?? []).find((p) => p.id === route.presetId);
+    if (!preset || spaceOf(preset) !== spaceOf(route)) return route.rules;
+    return preset.rules;
   }
 
   private ratePerMinute(accountId: string): number {

@@ -16,6 +16,7 @@ import type {
   ForumTopicRow,
   ForwardRow,
   IncidentRow,
+  PresetRow,
   NotificationRow,
   RelayStatusRow,
   RouteRow,
@@ -62,6 +63,14 @@ export const useRoutes = () => {
   return useQuery({
     queryKey: ["routes", space],
     queryFn: () => selectInSpace<RouteRow>("routes", space, "created_at", true),
+  });
+};
+
+export const usePresets = () => {
+  const space = useSpaceId();
+  return useQuery({
+    queryKey: ["presets", space],
+    queryFn: () => selectInSpace<PresetRow>("presets", space, "name", true, 200),
   });
 };
 
@@ -375,6 +384,63 @@ export function useDeleteRoute() {
     },
     ["routes"],
     "Could not unlink",
+  );
+}
+
+export function useInsertPreset() {
+  const space = useSpaceId();
+  return useTableMutation<{ name: string; rules: unknown }, PresetRow>(
+    async (values) => {
+      const { data, error } = await sb()
+        .from("presets")
+        .insert({ ...values, space_id: space })
+        .select("*")
+        .single();
+      if (error) throw new Error(/duplicate key/i.test(error.message) ? "A preset with that name already exists" : error.message);
+      return data as PresetRow;
+    },
+    ["presets"],
+    "Could not create preset",
+  );
+}
+
+export function useUpdatePreset() {
+  return useTableMutation<{ id: string; patch: Partial<PresetRow> }>(
+    async ({ id, patch }) => {
+      if ("rules" in patch) {
+        const problem = findRouteRulesProblem(patch.rules);
+        if (problem) throw new Error(problem);
+      }
+      const { error } = await sb().from("presets").update(patch).eq("id", id);
+      if (error) throw new Error(/duplicate key/i.test(error.message) ? "A preset with that name already exists" : error.message);
+    },
+    ["presets", "routes"],
+    "Could not save preset",
+  );
+}
+
+/** Routes that follow it fall back to their own rules (the database sets preset_id to null). */
+export function useDeletePreset() {
+  return useTableMutation<string>(
+    async (id) => {
+      const { error } = await sb().from("presets").delete().eq("id", id);
+      if (error) throw new Error(error.message);
+    },
+    ["presets", "routes"],
+    "Could not delete preset",
+  );
+}
+
+/** Point routes at a preset (or, with null, back to their own rules). */
+export function useSetRoutePreset() {
+  return useTableMutation<{ routeIds: string[]; presetId: string | null }>(
+    async ({ routeIds, presetId }) => {
+      if (routeIds.length === 0) return;
+      const { error } = await sb().from("routes").update({ preset_id: presetId }).in("id", routeIds);
+      if (error) throw new Error(error.message);
+    },
+    ["routes"],
+    "Could not apply preset",
   );
 }
 
