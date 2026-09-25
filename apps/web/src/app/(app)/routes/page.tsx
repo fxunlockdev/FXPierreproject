@@ -113,7 +113,7 @@ function RouteLine({
       <button
         onClick={onEdit}
         aria-label={`Edit route to ${receiver.title}`}
-        className="rounded-md p-1.5 text-faint opacity-0 transition-all hover:bg-raised hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
+        className="rounded-md p-1.5 text-faint opacity-0 transition-all [@media(hover:none)]:opacity-100 hover:bg-raised hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
       >
         <PencilSimple size={15} />
       </button>
@@ -124,7 +124,7 @@ function RouteLine({
           }
         }}
         aria-label={`Remove route to ${receiver.title}`}
-        className="rounded-md p-1.5 text-faint opacity-0 transition-all hover:bg-danger-soft hover:text-danger focus-visible:opacity-100 group-hover:opacity-100"
+        className="rounded-md p-1.5 text-faint opacity-0 transition-all [@media(hover:none)]:opacity-100 hover:bg-danger-soft hover:text-danger focus-visible:opacity-100 group-hover:opacity-100"
       >
         <TrashSimple size={15} />
       </button>

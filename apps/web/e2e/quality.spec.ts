@@ -77,3 +77,4 @@ test.describe("responsive", () => {
     await expect(page.locator("html")).not.toHaveClass(/light/);
   });
 });
+
